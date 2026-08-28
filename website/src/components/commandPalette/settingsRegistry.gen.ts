@@ -1613,7 +1613,9 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     "occurrence": 1,
     "label": "WakaTime API key",
     "description": "Authenticates coding-activity sync when WakaTime is enabled."
-    "id": "security.agent-identity",
+  },
+  {
+    "id": "security.identity",
     "labelKey": "pages.settings.securityPanel.agent_identity",
     "tab": "security",
     "type": "select",
@@ -1622,7 +1624,7 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
       "section": "identity"
     },
     "label": "Agent identity",
-    "description": "This crew's AgentCore identity. Workload lets the crew reach the gateway without a login. Login vends only gateway-approved MCP and requires a human to sign in. Off leaves this crew unchanged."
+    "description": "Choose how this crew identifies itself when it calls tools through your AgentCore Gateway — the front door in your cloud account that sits in front of the tool servers the crew can reach. Each option below says what the crew gains or loses."
   },
   {
     "id": "security.denied-commands",
@@ -1634,6 +1636,17 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
       "section": "rules"
     },
     "label": "Denied Commands"
+  },
+  {
+    "id": "security.gateway-url",
+    "labelKey": "pages.settings.securityPanel.agent_identity_gateway_url",
+    "tab": "security",
+    "type": "input",
+    "occurrence": 1,
+    "params": {
+      "section": "identity"
+    },
+    "label": "Gateway URL"
   },
   {
     "id": "security.governance-policy",
@@ -1657,14 +1670,6 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
     },
     "configKey": "agent.yolo_duration",
     "label": "How long auto-approve stays on"
-  },
-  {
-    "id": "security.identity",
-    "label": "Identity",
-    "labelKey": "pages.settings.securityPanel.agent_identity_posture",
-    "tab": "security",
-    "type": "select",
-    "occurrence": 1
   },
   {
     "id": "security.live-security-posture",
@@ -1699,6 +1704,17 @@ export const SETTINGS_REGISTRY: SettingEntry[] =
       "section": "tailnet"
     },
     "label": "Trust this machine's tailnet name"
+  },
+  {
+    "id": "security.workload-name",
+    "labelKey": "pages.settings.securityPanel.agent_identity_name",
+    "tab": "security",
+    "type": "input",
+    "occurrence": 1,
+    "params": {
+      "section": "identity"
+    },
+    "label": "Workload name"
   },
   {
     "id": "security.your-custom-denies",
