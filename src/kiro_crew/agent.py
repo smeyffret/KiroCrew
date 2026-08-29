@@ -1251,18 +1251,45 @@ def managed_mcp_spec_entry(name: str) -> dict[str, Any] | None:
     return entry
 
 
+def _is_managed_gateway_leftover(spec: Any) -> bool:
+    """True for an AgentCore Gateway URL entry under the reserved name.
+
+    Inject never writes a ``command`` under the reserved name, so a
+    command-shaped server is the operator's. An entry that is an AgentCore
+    Gateway URL (with or without headers) is the shape a session inject
+    has -- but nothing in this codebase persists that shape to the agent
+    file, so on disk it is either a leftover from an earlier build or the
+    operator's own authoring. The caller neutralizes it rather than deleting
+    it: bearer material goes, the URL stays. Other remotes under the
+    reserved name are untouched. A non-object entry never matches.
+    """
+    if not isinstance(spec, dict):
+        return False
+    command = spec.get("command")
+    if isinstance(command, str) and command.strip():
+        return False
+    from kiro_crew.platform.agentcore_sigv4 import is_agentcore_gateway_url
+
+    url = spec.get("url")
+    return isinstance(url, str) and is_agentcore_gateway_url(url)
+
+
 def _merge_edition_mcp(mcp: dict[str, Any]) -> None:
-    """Merge edition extras + the AgentCore Gateway rebuild contribution.
+    """Merge edition extras and neutralize bearer material under the reserved name.
 
     Extras are ADD-only (setdefault) after secret keys are stripped so a
     companion ``Authorization`` header cannot land in kirocrew.json. The
-    Gateway server itself is ours: workload posture assigns a URL-only spec;
-    any other posture retracts a leftover entry. Login withhold of other
-    remotes is a later PR.
+    Gateway is session-injected, never written into the agent file, so a
+    profile that disabled AgentCore cannot inherit it from ``--agent``.
+    An AgentCore Gateway URL entry under the reserved name is the
+    operator's configuration (this codebase never persists one): it is
+    kept, and only its ``headers`` / ``Authorization`` are removed so no
+    bearer survives in the file. Other remotes and command servers under
+    the reserved name are untouched. Login withhold of other remotes is a
+    later PR.
     """
     from kiro_crew.platform.agentcore_gateway import (
         GATEWAY_SERVER_NAME,
-        rebuild_gateway_contribution,
         strip_secret_spec_keys,
     )
 
@@ -1270,11 +1297,11 @@ def _merge_edition_mcp(mcp: dict[str, Any]) -> None:
         if name == GATEWAY_SERVER_NAME or not isinstance(spec, dict):
             continue
         mcp.setdefault(name, strip_secret_spec_keys(spec))
-    contribution = rebuild_gateway_contribution()
-    if GATEWAY_SERVER_NAME in contribution:
-        mcp[GATEWAY_SERVER_NAME] = contribution[GATEWAY_SERVER_NAME]
-    else:
+    leftover = mcp.get(GATEWAY_SERVER_NAME)
+    if leftover is None:
         mcp.pop(GATEWAY_SERVER_NAME, None)
+    elif _is_managed_gateway_leftover(leftover):
+        mcp[GATEWAY_SERVER_NAME] = strip_secret_spec_keys(leftover)
 
 
 def _extra_mcp_scope_globals() -> list[Path]:
