@@ -2248,6 +2248,36 @@ restart. An accepted in-flight wake persists its finite completion-evidence
 deadline and resumes that deadline after restart; an older claim with no deadline
 is retained, inactive, and blocked. A persisted `BUSY` claim intentionally has no
 completion deadline and resumes its existing `next_due_ts` retry after restart.
+The record also persists its descriptive creation surface independently of its slot
+binding. Dashboard and native-channel consumers stamp it at the directive boundary;
+Slack-linked dashboard turns carry the channel stamp through queue and recovery paths.
+The stamp alone conveys no credential authority. Dashboard mutations reserve the
+loop id and bind an exact provider-kind-and-target owner-credential grant in the
+sandbox-hidden encrypted-vault directory; creation activates it only after monitor
+persistence, updates rebind it, and removal revokes it. A replacement keeps the prior
+row and its grant as a rollback candidate until activation succeeds. If activation
+fails, the service atomically restores that row before reporting the failed request, so
+a transient vault write cannot consume a stopped monitor and turn an immediate retry
+into a conflict. Updates likewise restore the exact prior monitor snapshot when the
+protected grant cannot be persisted, and refuse that rollback if another mutation has
+already changed the committed state. Grant mutations treat only a missing provenance
+record as empty; unreadable, malformed, or partially invalid records fail the mutation
+instead of replacing unrelated grants with a newly reconstructed record. Revocation
+writes an id tombstone to a separate protected record before cleaning up the active
+grant. The tombstone remains authoritative across a cleanup failure and gateway
+restart; its unreadable or malformed record denies all grants. An unsuccessful
+tombstone write immediately denies that id in-process and is retried by later
+credential checks. A later authenticated prepare or rebind clears the tombstone only
+after its replacement identity is protected, so an interrupted re-grant stays denied.
+If the tombstone itself cannot be persisted, loop removal fails before the
+agent-writable monitor row is deleted; the still-bound grant is never orphaned for a
+replayed row to inherit after restart. A generic AutoNudge replacement follows the
+same transaction boundary: it captures whether the displaced structured row owns an
+exact active grant, revokes before the combined snapshot, and restores that grant
+before re-arming the prior row when persistence fails.
+A missing stamp on a legacy record is `unknown` and denies
+ambient owner credentials for every provider outside the explicit GitHub/GitLab
+channel allowlist.
 Before a spent BUSY claim becomes terminal, its settlement path also clears any
 late transport-acceptance marker, so an inactive budget record cannot retain an
 accepted turn that no completion timer owns.
@@ -2287,7 +2317,14 @@ provider probe runs off the event loop behind one shared four-probe concurrency
 gate. Missing, unsupported, or untrusted provider CLI resolution is SEL-audited
 as denied before its setup error propagates; a resolved CLI must record its
 critical invocation event before spawn. Provider CLI resource limits are
-installed by the synchronous spawn shim after exec. Revoked GitLab hosts and
+installed by the synchronous spawn shim after exec. Because a structured monitor
+probe can expose an ambient provider login or invocation-scoped token, its
+`glab`/`az` executable and every parent must satisfy the protected system-owned,
+canonical trust policy even when interactive provider features use the relaxed
+same-user policy. GitHub retains the established same-user `gh` policy, which
+supports stock Homebrew and user-local installs while refusing other-user,
+world-writable, project, and workspace paths; its sandbox and audit remain the
+credential boundary. Revoked GitLab hosts and
 incomplete Bitbucket credentials emit a credential-free `denied` audit before
 returning their terminal authorization or authentication failure, without provider
 I/O. Failure to write a denial audit never permits the rejected probe.
@@ -2333,7 +2370,9 @@ refreshed GitLab-host snapshot before target normalization; they never read conf
 files on the gateway event loop. Azure status/policy labels and Bitbucket build-status
 labels become stable opaque identities before canonicalization, so provider display
 text cannot enter a structured wake. A GitHub check label that normalizes to no display
-text becomes one stable opaque `unknown` check instead of failing the entire probe.
+text retains its provider-derived state under one stable opaque identity instead of
+failing the entire probe. A legacy terminal observation that predates
+`checks_complete` projects as complete, while a present malformed value fails closed.
 Generic issue/pull-request comments and
 advisory review findings that are not represented by the provider's canonical
 review or check facts remain outside its completion predicate; a babysit
@@ -2642,6 +2681,10 @@ are refused while a wake is in flight. A second `monitor_watch` is likewise
 refused with 409 while the existing monitor has a wake in flight, preserving the
 old monitor ID until its correlated completion has been accounted. Cadence,
 positive budgets, and wake-instruction edits preserve the baseline and generation.
+When a channel-origin directive changes a monitor target, the persisted creation
+surface ratchets to `channel` in the same atomic update. A channel can therefore
+retarget a dashboard-created monitor without retaining dashboard-only owner
+credentials for the newly selected subject.
 Budget updates remain sparse through REST/directive authorization and merge with
 the current budget record only while holding the service lock, so independent
 concurrent edits cannot replace one another with values from stale snapshots.
@@ -2693,7 +2736,9 @@ target update. Restart rejects an unsupported future monitor version with the
 stable `unsupported_monitor_version` code and does not rewrite its exact retained
 raw payload. Restart also conditionally replaces the exact monitor id and
 configuration generation read by the request; a concurrent restart or edit
-returns 409 instead of silently replacing the winner. Structured AutoNudge
+returns 409 instead of silently replacing the winner. It preserves the record's
+creation surface, so restarting a channel-created monitor cannot promote it into a
+dashboard-created owner-credential grant. Structured AutoNudge
 websocket payloads use the owner-only dashboard
 channel; legacy websocket frames keep their existing authenticated-client
 broadcast. Legacy `/api/autonudge` list/get routes return a structured record

@@ -4600,6 +4600,7 @@ class _ChatSlot:
         meta: dict | None = None,
         *,
         directive_user_origin: bool = False,
+        directive_channel_origin: bool = False,
     ) -> str:
         return self._queue_repository.queue_append(
             self,
@@ -4607,6 +4608,7 @@ class _ChatSlot:
             kind,
             meta,
             directive_user_origin=directive_user_origin,
+            directive_channel_origin=directive_channel_origin,
         )
 
     def _note_enqueue(self) -> None:
@@ -4622,6 +4624,7 @@ class _ChatSlot:
         on_consumed: Callable[[bool], None] | None = None,
         on_irreversibly_consumed: Callable[[], Awaitable[None] | None] | None = None,
         directive_user_origin: bool = False,
+        directive_channel_origin: bool = False,
     ) -> str:
         return self._queue_repository.queue_insert(
             self,
@@ -4633,6 +4636,7 @@ class _ChatSlot:
             on_consumed,
             on_irreversibly_consumed,
             directive_user_origin,
+            directive_channel_origin,
         )
 
     def queue_pop(self, index: int = 0) -> dict[str, Any]:
@@ -4656,12 +4660,14 @@ class _ChatSlot:
         content: str,
         *,
         directive_user_origin: bool = False,
+        directive_channel_origin: bool = False,
     ) -> bool:
         return self._queue_repository.queue_edit_by_id(
             self,
             queue_id,
             content,
             directive_user_origin=directive_user_origin,
+            directive_channel_origin=directive_channel_origin,
         )
 
     def queue_promote_by_id(self, queue_id: str) -> bool:

@@ -16707,6 +16707,7 @@ class TestEmptyResponseRetry:
         calls = []
         callbacks = []
         directive_origins = []
+        directive_channel_origins = []
         on_consumed = MagicMock()
         orig = _ChatSlot.queue_insert
 
@@ -16714,6 +16715,7 @@ class TestEmptyResponseRetry:
             calls.append(a)
             callbacks.append(kw.get("on_consumed"))
             directive_origins.append(kw.get("directive_user_origin"))
+            directive_channel_origins.append(kw.get("directive_channel_origin"))
             return orig(self_slot, *a, **kw)
 
         with (
@@ -16736,6 +16738,7 @@ class TestEmptyResponseRetry:
                 slot,
                 "test message",
                 _directive_user_origin=True,
+                _directive_channel_origin=True,
                 _on_consumed=on_consumed,
             )
             background_tasks = list(state._background_tasks)
@@ -16749,6 +16752,7 @@ class TestEmptyResponseRetry:
         assert (0, "test message") in calls
         assert callbacks[0] is on_consumed
         assert directive_origins == [True]
+        assert directive_channel_origins == [True]
         assert [args.args for args in on_consumed.call_args_list] == [(True,), (False,)]
         # No notice card shown on first attempt — the empty is silently re-queued
         notice_msgs = [m for m in slot.messages if m.get("role") == "notice"]
