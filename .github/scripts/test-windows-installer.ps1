@@ -1,11 +1,24 @@
 param(
-  [switch]$SkipGatewayValidation
+  [switch]$SkipGatewayValidation,
+  # Floor for the precompiled startup modules the installed payload must carry.
+  # 1000 describes the FULL release bundle (core + voice extras). A caller that
+  # bundles a narrower payload passes its own measured floor rather than having
+  # this assertion silently weakened for everyone: the defect it catches is
+  # bytecode filtered out of the artifact, or the launcher redirecting imports
+  # into an empty user cache, and both land near zero.
+  [int]$MinStartupPycs = 1000
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 $MaxInstallSeconds = 120
 $MaxGatewayReadySeconds = 30
+
+# `Stop-GatewayTree`, shared with `scripts/smoke-windows-install.ps1`. Both boot a
+# gateway out of an installed tree and then uninstall it, so the teardown that makes
+# the tree deletable must be ONE definition -- a second copy is how the two scripts
+# came to disagree about whether ending the parent was enough.
+. (Join-Path $PSScriptRoot ".." ".." "scripts" "windows-process-tree.ps1")
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @"
@@ -114,9 +127,41 @@ $expectedDisplayName = "$productName $($package.version)"
 # the workspace for artifact upload. The /D argument must remain last for NSIS.
 $requestedInstallRoot = Join-Path ([IO.Path]::GetFullPath($env:TEMP)) `
   "kirocrew-installer-test-$PID"
+# A TREE, not one file. The boundary being tested is "the uninstaller removes the
+# subdirectory it created and nothing else in the parent", and a single witness
+# cannot distinguish that from a recursive delete that happens to spare one name.
+# Two files at different depths plus the directory holding them can: a recursive
+# sweep takes the nested one, and content is compared rather than mere existence
+# so a file recreated empty is not mistaken for a survivor.
 $sentinel = Join-Path $requestedInstallRoot "pre-existing-user-file.txt"
+$sentinelBody = "must survive uninstall"
+$sentinelDir = Join-Path $requestedInstallRoot "pre-existing-subdir"
+$sentinelNested = Join-Path $sentinelDir "nested-user-file.txt"
+$sentinelNestedBody = "must survive uninstall at depth"
 New-Item -ItemType Directory -Path $requestedInstallRoot -Force | Out-Null
-Set-Content -LiteralPath $sentinel -Value "must survive uninstall" -Encoding utf8NoBOM
+New-Item -ItemType Directory -Path $sentinelDir -Force | Out-Null
+Set-Content -LiteralPath $sentinel -Value $sentinelBody -Encoding utf8NoBOM
+Set-Content -LiteralPath $sentinelNested -Value $sentinelNestedBody -Encoding utf8NoBOM
+
+function Assert-PreExistingTreeIntact {
+  param([string]$Stage)
+
+  if (-not (Test-Path -LiteralPath $sentinel -PathType Leaf)) {
+    throw "$Stage removed a file that existed before setup started: $sentinel"
+  }
+  if ((Get-Content -LiteralPath $sentinel -Raw).Trim() -ne $sentinelBody) {
+    throw "$Stage rewrote a pre-existing file instead of leaving it alone: $sentinel"
+  }
+  if (-not (Test-Path -LiteralPath $sentinelDir -PathType Container)) {
+    throw "$Stage removed a directory that existed before setup started: $sentinelDir"
+  }
+  if (-not (Test-Path -LiteralPath $sentinelNested -PathType Leaf)) {
+    throw "$Stage recursed into the parent and removed nested content: $sentinelNested"
+  }
+  if ((Get-Content -LiteralPath $sentinelNested -Raw).Trim() -ne $sentinelNestedBody) {
+    throw "$Stage rewrote nested pre-existing content: $sentinelNested"
+  }
+}
 
 # Capture the reverted native install-mode page as review evidence. This preview
 # is closed before installation and is outside the performance measurement.
@@ -205,9 +250,7 @@ $installLocationFull = [IO.Path]::GetFullPath($installLocation).TrimEnd("\")
 if ($installLocationFull -eq $requestedInstallRootFull) {
   throw "The installer claimed an existing directory instead of creating an owned product subdirectory."
 }
-if (-not (Test-Path -LiteralPath $sentinel -PathType Leaf)) {
-  throw "The install removed a file that existed before setup started."
-}
+Assert-PreExistingTreeIntact "The install"
 
 $installedExecutable = Join-Path $installLocation "$productFilename.exe"
 if (-not (Test-Path -LiteralPath $installedExecutable -PathType Leaf)) {
@@ -231,8 +274,8 @@ if (-not (Test-Path -LiteralPath $bundledPython -PathType Leaf)) {
 $startupPycCount = @(
   Get-ChildItem -LiteralPath $backendRoot -Recurse -File -Filter "*.pyc"
 ).Count
-if ($startupPycCount -lt 1000) {
-  throw "Expected at least 1000 precompiled startup modules; found $startupPycCount."
+if ($startupPycCount -lt $MinStartupPycs) {
+  throw "Expected at least $MinStartupPycs precompiled startup modules; found $startupPycCount."
 }
 
 $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -244,10 +287,24 @@ $gatewayStdout = Join-Path $evidence "gateway-stdout.log"
 $gatewayStderr = Join-Path $evidence "gateway-stderr.log"
 New-Item -ItemType Directory -Path $gatewayHome -Force | Out-Null
 
+# Point the ACP backend at the fake one that ships INSIDE the payload under test,
+# so readiness needs no real model, no network and no sign-in. It must be a .cmd:
+# KIROCREW_KIRO_BIN names something CreateProcess can run, and a .py would rely
+# on a shebang, which Windows has no equivalent for. The shim runs the INSTALLED
+# interpreter, so nothing outside the artifact is involved.
+$fakeBackend = Join-Path $evidence "kiro-backend.cmd"
+Set-Content -Encoding ascii -LiteralPath $fakeBackend -Value @(
+  '@echo off',
+  "`"$bundledPython`" -s -m kiro_crew.testing.fake_acp_backend %*"
+)
+
 $savedGatewayEnv = @{
   KIROCREW_HOME = $env:KIROCREW_HOME
   KIROCREW_PROJECT_DIR = $env:KIROCREW_PROJECT_DIR
   KIRO_HOME = $env:KIRO_HOME
+  KIROCREW_KIRO_BIN = $env:KIROCREW_KIRO_BIN
+  KIROCREW_FAKE_ACP_TEST_MODE = $env:KIROCREW_FAKE_ACP_TEST_MODE
+  KIROCREW_SKIP_MODEL_DOWNLOAD = $env:KIROCREW_SKIP_MODEL_DOWNLOAD
   PYTHONPYCACHEPREFIX = $env:PYTHONPYCACHEPREFIX
   PYTHONPATH = $env:PYTHONPATH
   PYTHONNOUSERSITE = $env:PYTHONNOUSERSITE
@@ -261,7 +318,24 @@ try {
   $env:KIROCREW_HOME = $gatewayHome
   $env:KIROCREW_PROJECT_DIR = $installLocation
   $env:KIRO_HOME = Join-Path $gatewayHome "kiro"
-  $env:PYTHONPYCACHEPREFIX = $null
+  $env:KIROCREW_KIRO_BIN = $fakeBackend
+  # Marks this as a test rig. It grants no launch privilege: the shim above is
+  # exec'd by the ordinary in-place path like any other runnable file.
+  $env:KIROCREW_FAKE_ACP_TEST_MODE = "1"
+  # Embeddings are default-on; a ~610MB download inside a 30-second readiness
+  # ceiling would fail the gate for a reason unrelated to the artifact.
+  $env:KIROCREW_SKIP_MODEL_DOWNLOAD = "1"
+  # Bytecode this boot compiles goes OUTSIDE the installed tree, which is what the
+  # shipped desktop app does (it exports the same variable at
+  # `<data home>/cache/pycache` to keep bytecode out of the codesigned bundle).
+  # Leaving it unset writes `__pycache__` beside the bundled sources instead, and
+  # NSIS removes only what its install log recorded -- so those post-install files
+  # survive the uninstall, keep the directory non-empty, and the "silent uninstall
+  # left the install directory behind" assertion below then fails on residue this
+  # script created rather than on anything the uninstaller got wrong. Measured: 3
+  # such files, and the startup-pyc floor is unaffected because it counts the
+  # SHIPPED payload before the gateway ever runs.
+  $env:PYTHONPYCACHEPREFIX = Join-Path $gatewayHome "pycache"
   $env:PYTHONPATH = $null
   $env:PYTHONNOUSERSITE = "1"
   $env:PYTHONUTF8 = "1"
@@ -290,10 +364,16 @@ try {
   )
 } finally {
   $gatewayTimer.Stop()
-  if ($null -ne $gatewayProcess -and -not $gatewayProcess.HasExited) {
-    Stop-Process -Id $gatewayProcess.Id -Force -ErrorAction SilentlyContinue
-    $gatewayProcess.WaitForExit()
-  }
+  # The gateway's CHILDREN are what block the uninstall, so end the TREE and then
+  # wait for the install directory to be released -- not just for the parent to go.
+  # A gateway spawns the ACP backend and the managed MCP servers, and every one of
+  # them runs the BUNDLED interpreter out of $installLocation. Windows will not
+  # delete a running executable's image, so a single surviving child makes the
+  # silent uninstall leave the whole directory behind. `Stop-Process` alone ends
+  # only the process named -- orphaning that tree -- which is why this failed on
+  # roughly every other run with "Silent uninstall left the install directory
+  # behind" while the parent had exited perfectly cleanly.
+  Stop-GatewayTree $gatewayProcess $installLocation
   foreach ($name in $savedGatewayEnv.Keys) {
     if ($null -eq $savedGatewayEnv[$name]) {
       Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
@@ -350,16 +430,35 @@ if ($remainingRegistrations.Count -ne 0) {
   throw "Silent uninstall left a $productName registration behind."
 }
 if (Test-Path -LiteralPath $installLocation) {
-  throw "Silent uninstall left the install directory behind: $installLocation"
+  # NAME the residue. "The directory is still there" is not actionable: the
+  # uninstaller deletes what its install log recorded, so anything CREATED after
+  # install -- the `__pycache__` trees the measured gateway boot writes beside the
+  # bundled sources are the obvious candidate -- survives and keeps the directory
+  # non-empty. Which of those it is decides whether the fix belongs in the
+  # uninstaller, in this script's teardown, or in what the gateway is allowed to
+  # write into its own install tree, and the answer is one listing away.
+  $residue = @(
+    Get-ChildItem -LiteralPath $installLocation -Recurse -Force -ErrorAction SilentlyContinue
+  )
+  $files = @($residue | Where-Object { -not $_.PSIsContainer })
+  $summary = ($files | Group-Object {
+    if ($_.FullName -match '__pycache__') { '__pycache__' } else { 'other' }
+  } | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
+  Write-Host "Residue under ${installLocation}: $($files.Count) file(s) [$summary]"
+  $files |
+    Where-Object { $_.FullName -notmatch '__pycache__' } |
+    Select-Object -First 40 -ExpandProperty FullName |
+    ForEach-Object { Write-Host "  left: $_" }
+  throw ("Silent uninstall left the install directory behind: $installLocation " +
+    "($($files.Count) file(s): $summary)")
 }
-if (-not (Test-Path -LiteralPath $sentinel -PathType Leaf)) {
-  throw "Silent uninstall removed content from the pre-existing parent directory."
-}
+Assert-PreExistingTreeIntact "Silent uninstall"
 
-# The sentinel has proved ownership boundaries; leave only reusable evidence,
-# not a temp directory on local developer runs.
-Remove-Item -LiteralPath $sentinel -Force
-Remove-Item -LiteralPath $requestedInstallRoot -Force
+# The tree has proved ownership boundaries; leave only reusable evidence,
+# not a temp directory on local developer runs. Recursive because the witness is
+# a tree now -- a non-recursive remove would fail on the surviving subdirectory
+# and turn a PASSING run into a red one.
+Remove-Item -LiteralPath $requestedInstallRoot -Recurse -Force
 
 if ($elapsed -gt $MaxInstallSeconds) {
   throw "Windows installation took $elapsed seconds, above the $MaxInstallSeconds-second ceiling."
