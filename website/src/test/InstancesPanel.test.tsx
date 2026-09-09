@@ -159,6 +159,23 @@ describe('InstancesPanel', () => {
     expect(screen.getByRole('button', { name: 'Add remote instance' })).toBeEnabled()
   })
 
+  it('renders a loopback row with its real target', async () => {
+    ;vi.mocked(api.listInstances).mockResolvedValue({
+      active: true,
+      instances: [{
+        id: 'loopback-1', name: 'same-host', ssh_host: '', remote_port: 5477, local_port: 0,
+        ttl: '20h', connection_method: 'loopback', ssm_target: '', aws_profile: '', aws_region: '',
+        ssm_run_as: '', remote_bin: '', was_connected: false,
+        status: { instance_id: 'loopback-1', state: 'disconnected' as const },
+      }],
+      warm_set_cap: 5,
+    } as never)
+    renderWithProviders(<InstancesPanel />)
+
+    expect(await screen.findByText('Loopback (same host)')).toBeInTheDocument()
+    expect(screen.getByText(/127\.0\.0\.1.*remote port.*5477/i)).toBeInTheDocument()
+  })
+
   it('switching the connection method to AWS SSM swaps in the SSM fields', async () => {
     // Regression guard for the native-<select> → SimpleSelect migration. The
     // picker is a Radix Select: a `change` event on the trigger does nothing —

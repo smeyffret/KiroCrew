@@ -111,6 +111,15 @@ const CONNECTED_MANUAL: InstanceView = {
   ...MANUAL_INSTANCE,
   status: { instance_id: 'm1', state: 'connected' },
 }
+const LOOPBACK_INSTANCE: InstanceView = {
+  ...MANUAL_INSTANCE,
+  id: 'loopback-1',
+  name: 'same-host',
+  connection_method: 'loopback',
+  ssh_host: '',
+  remote_port: 5477,
+  status: { instance_id: 'loopback-1', state: 'disconnected' },
+}
 const DONE_JOB: LaunchJob = {
   id: 'j-done',
   tag: 'kc-3f9a',
@@ -686,6 +695,38 @@ describe('RemoteCrewPanel — disabled feature gate', () => {
 })
 
 describe('RemoteCrewPanel — editing a crew', () => {
+  it('renders and edits a loopback crew without rewriting it as SSH', async () => {
+    vi.mocked(api.listInstances).mockResolvedValue(list([LOOPBACK_INSTANCE]))
+    vi.mocked(api.updateInstance).mockResolvedValue({
+      ...LOOPBACK_INSTANCE,
+      name: 'same-host-renamed',
+    })
+    const u = setup()
+    renderWithProviders(<RemoteCrewPanel />)
+
+    expect(await screen.findByText('Loopback (same host)')).toBeInTheDocument()
+    expect(screen.getByText(/127\.0\.0\.1.*remote port.*5477/i)).toBeInTheDocument()
+
+    await openRowMenu(u)
+    await u.click(await screen.findByRole('menuitem', { name: /Edit settings/i }))
+    const form = within(await screen.findByRole('group', { name: /Edit same-host/i }))
+    expect(form.getByRole('combobox', { name: /Connection method/i }))
+      .toHaveTextContent('Loopback (same host)')
+    expect(form.queryByRole('textbox', { name: /SSH host/i })).not.toBeInTheDocument()
+    expect(form.queryByRole('textbox', { name: /Remote kirocrew path/i })).not.toBeInTheDocument()
+    expect(form.getByRole('button', { name: /Save changes/i })).toBeEnabled()
+
+    const name = form.getByRole('textbox', { name: /^Name$/i })
+    await u.clear(name)
+    await u.type(name, 'same-host-renamed')
+    await u.click(form.getByRole('button', { name: /Save changes/i }))
+
+    await waitFor(() => expect(api.updateInstance).toHaveBeenCalled())
+    const patch = vi.mocked(api.updateInstance).mock.calls[0][1]
+    expect(patch).toEqual({ name: 'same-host-renamed' })
+    expect(patch).not.toHaveProperty('connection_method', 'ssh')
+  })
+
   it('saves an edited host and port to the crew that was already configured', async () => {
     // Correcting a crew used to mean deleting it and adding it back, which threw
     // away the record (and its connect history) along with the typo.
