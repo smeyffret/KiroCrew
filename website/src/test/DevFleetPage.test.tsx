@@ -1699,6 +1699,9 @@ describe('pruneVerdictLabel', () => {
     expect(pruneVerdictLabel('active')).toBe('PR open or unmerged commits')
     expect(pruneVerdictLabel('fresh')).toMatch(/recently/i)
     expect(pruneVerdictLabel('dirty_check_failed')).toMatch(/git status/i)
+    // A release-channel pin holds no commits of its own by design, so without
+    // its own reason it would borrow `empty`'s wording and read as abandoned.
+    expect(pruneVerdictLabel('release_channel')).toMatch(/release-channel/i)
   })
   it('falls back to the raw code for unknown values and never throws', () => {
     expect(pruneVerdictLabel('totally_unknown')).toBe('totally_unknown')
