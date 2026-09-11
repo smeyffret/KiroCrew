@@ -103,11 +103,10 @@ from kiro_crew import model_registry, platform_compat, shutdown_event
 from kiro_crew.acp.client import advertised_model_ids, model_is_unusable
 from kiro_crew.acp.types import (
     ACP_BACKEND_KIRO,
-    ACP_BACKENDS_ACP_RUNTIME,
     PROVIDER_LABEL_CLAUDE,
     PROVIDER_LABEL_DEFAULT,
 )
-from kiro_crew.acp_backends import selectable_backends
+from kiro_crew.acp_backends import acp_runtime_backends, selectable_backends
 from kiro_crew.agent import kiro_agents_dir_path
 from kiro_crew.agent_discovery import _read_agent_spec, spec_model
 from kiro_crew.agent_sdk.backend_identity import is_claude_backend_name
@@ -531,8 +530,12 @@ BACKGROUND_AGENT = "kirocrew-lite"
 # ``register_selectable_backend`` — strictly after this module is imported. A
 # module-level intersection would snapshot the baseline and permanently exclude
 # a backend the operator did register.
+#
+# ``acp_runtime_backends()`` and not the set: the codex preview switch
+# (``KIROCREW_CODEX_ACP_RUNTIME``, off by default) lives in that one function, and
+# it is read per call for the same reason the intersection is.
 def _bg_runtime_backends() -> frozenset[str]:
-    return ACP_BACKENDS_ACP_RUNTIME & selectable_backends()
+    return acp_runtime_backends() & selectable_backends()
 
 
 def _load_bg_runtime_types() -> tuple[Any, type[BaseException]]:

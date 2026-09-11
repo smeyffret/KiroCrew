@@ -27,7 +27,6 @@ from kiro_crew.acp.types import (
     ACP_BACKEND_KAS,
     ACP_BACKEND_KIRO,
     ACP_BACKEND_OPENCODE,
-    ACP_BACKENDS_ACP_RUNTIME,
     ACP_BACKENDS_COMPACT,
     ACP_BACKENDS_EFFORT_VIA_CONFIG_OPTION,
     ACP_BACKENDS_KIRO_SLASH_COMMANDS,
@@ -41,6 +40,7 @@ from kiro_crew.acp.types import (
     PROVIDER_LABEL_OPENCODE,
     STOP_REASON_CANCELLED,
     STOP_REASON_END_TURN,
+    acp_runtime_backends,
 )
 from kiro_crew.acp_backends import POLICY_ID_BY_BACKEND
 from kiro_crew.agent_sdk import host_auth
@@ -540,8 +540,14 @@ class AcpProvider(LLMProvider):
         spelled ``not is_claude_backend`` — which would hand the kiro-family
         path to every harness added later. The claude AcpClient is deliberately
         not a member: it runs one process per session and shares no runtime.
+
+        Reads ``acp_runtime_backends()`` rather than the set directly, so the
+        codex preview switch (``KIROCREW_CODEX_ACP_RUNTIME``, off by default) has
+        one home instead of one per call site. With the switch off the function
+        returns ``ACP_BACKENDS_ACP_RUNTIME`` verbatim and this property answers
+        exactly what it answered before the switch existed.
         """
-        return self._client.backend in ACP_BACKENDS_ACP_RUNTIME
+        return self._client.backend in acp_runtime_backends()
 
     @property
     def is_session_sharing_eligible(self) -> bool:
