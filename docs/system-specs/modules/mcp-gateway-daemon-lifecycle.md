@@ -24,6 +24,16 @@ Either drift asks the incumbent to stand down through `_request_stand_down`, who
 
 The fail-open branch is unchanged in kind and louder in degree: a stale daemon that REFUSES is still serving, so it is adopted rather than left unsupervised, but for code drift the log line is an ERROR naming the consequence (pooled backends may speak a stale protocol) and the fix (`kirocrew restart`).
 
+Adoption does not establish support for a new registration field. A stub carrying
+an explicit session key requires `session_bound_ack` in the Registered
+capabilities before sending MCP traffic, because an older daemon can replace its
+child identity with a delayed parent PID claim. At initial connection, missing
+support closes the broker connection and uses the existing verified direct
+fallback. On reconnect it closes and terminates before initialization replay;
+exec cannot recover an already-consumed initialization. Key-less warm-pool
+connections do not require this capability. The existing `poolable_ack` check
+continues to protect private backend topology independently.
+
 ## The pool key
 
 `stub.pool_binary_version` folds `code_fingerprint()` into the registered `binary_version` when the target args name one of Kiro Crew's own servers (`_KIROCREW_MCP_SUBCOMMANDS`: `mcp-core`, `mcp-cron`, `mcp-work`, `mcp-computer`, `mcp-dashboard`) and leaves third-party servers on the binary hash alone. So even a daemon that survives — an operator-run one with no owner, or one whose stand-down was refused — hands a stub from new code a NEW pool partition rather than the old checkout's backend; a `git pull` cold-starts Kiro Crew's own servers and nothing else.
@@ -33,5 +43,10 @@ The fail-open branch is unchanged in kind and louder in degree: a stale daemon t
 `dashboard/handlers/sessions.py::api_session_directive` recognises the pre-call-input body (`kind` present, `tool` absent) and refuses it as `stale_mcp_backend`, with a warning that names the cause (an MCP server running older code than the gateway) and the fix, instead of the generic `not_derivable` that pointed operators at the directive tools. `kirocrew doctor` (`cli_doctor._doctor_mcp_gateway_daemon`) prints the daemon's pid, owner and fingerprint beside this install's, and records an issue when they differ; the same read is `daemon_control.describe_daemon`.
 
 ## Tests
+
+`test_mcp_gateway_stub_session_binding.py` exercises initial connection and
+reconnection against older, current and malformed capability replies, with and
+without explicit binding and backend sharing. It pins fallback before traffic,
+terminal reconnect refusal before replay, and the daemon's acknowledgment.
 
 `test_mcp_gateway_daemon_lifecycle.py`: the fingerprint's git rule including two uncommitted edits on one HEAD differing, the mtime rule, and stability; the owner sweeper on a dead owner, a recycled PID, an inconclusive probe and a missing baseline; a REAL daemon spawned against a throwaway owner process exiting rc=0 when that owner is killed; `_code_drift` on matching, different and absent fingerprints; `_owned_by_a_live_other` and `_orphaned` on absent, zero, junk, self, dead and live owners; a stems-fit, code-matching daemon owned by a live other gateway refused (no stand-down, no spawn, ERROR logged) and the same daemon with a dead owner asked to stand down with `orphaned=True` and replaced; the daemon honouring an orphan claim only when its own recorded owner is gone and refusing it for a live owner or no owner; warming computing off the main thread and filling the cache; a fit-by-stems but stale-by-code incumbent being asked to stand down with `stale_code=True`; the stand-down frame carrying the caller fingerprint; the daemon honouring a differing caller fingerprint, refusing a matching one, and still honouring the old stems-only frame; the pong's fields; the pool-key fold for Kiro Crew servers only. `test_mcp_gateway_daemon_control.py`: `describe_daemon`/`stop_daemon` on every outcome including the refusal to signal a pid that is not gatewayd, the CLI reporting each outcome without failing the stop on both the service and listener paths, and the doctor line for same, different, pre-fingerprint and absent daemons. `test_directive_queue.py` pins the `stale_mcp_backend` refusal and its wording. `test_mcp_gateway_adopted_daemon_repair.py`'s fit pongs now carry the real fingerprint, so the target-drift behaviour it pins is unchanged.

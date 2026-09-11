@@ -511,6 +511,9 @@ def build_register_payload(args: argparse.Namespace) -> dict:
         "channel_id": channel_id,
         "config_snapshot_hash": _CONFIG_SNAPSHOT_PLACEHOLDER,
         "caller": caller,
+        # A session-injected key identifies this stub for its whole lifetime.
+        # A delayed claim for its shared runtime must not replace that key.
+        "session_bound": bool(os.environ.get("KIROCREW_SESSION_KEY")),
         # Claim-push (gateway → gatewayd ``claim`` frame): the ancestor PID
         # chain of this stub, nearest first. gatewayd indexes the connection
         # under EVERY ancestor so a claim naming any level of the runtime's
@@ -1322,7 +1325,7 @@ async def _reconnect(
     rather than gone -- and retries a handshake replay that lost its connection
     for the same reason, since the daemon reached first may still be starting or
     may die again. What is NOT retried is a refusal: an older daemon will not
-    grow the ``poolable_ack`` capability, and a generation that answers the
+    grow a missing registration capability, and a generation that answers the
     handshake differently will keep answering that way, so retrying either only
     delays the terminal exit.
     """
@@ -1382,6 +1385,14 @@ async def _reconnect(
                 "poolable field and this server is not shareable; refusing "
                 "rather than risk being pooled pool=%s",
                 pool_label,
+            )
+            return None
+
+        if payload.get("session_bound") is True and "session_bound_ack" not in _caps:
+            await _safe_close(writer)
+            logger.warning(
+                "stub reconnect: gateway cannot preserve the explicit session "
+                "binding; refusing this generation pool=%s", pool_label,
             )
             return None
 
@@ -1712,6 +1723,9 @@ def fallback_exec(args: argparse.Namespace) -> None:
     diagnostic. Windows has no in-place exec, so there the backend runs as a
     child inheriting this process's stdio -- see :func:`_fallback_spawn_child`
     for why the emulated ``exec*`` would kill the session outright."""
+    # Keep discovery's HTTP and policy imports out of the normal stub path.
+    from kiro_crew.mcp_discovery import _is_first_party_managed_argv
+
     target_args = _split_target_args(args.target_args, args.target_args_sep)
     argv = [args.target_command, *target_args]
     # Restore the server's declared env. The rewriter moves declared env
@@ -1719,8 +1733,32 @@ def fallback_exec(args: argparse.Namespace) -> None:
     # otherwise reads only for PoolKey hashing. On this fallback path we exec
     # the real backend directly, so it must run with its declared env to match
     # the non-pooled baseline — the daemon's own environment lacks it.
+    declared_env = _parse_env_file(getattr(args, "env_file", "") or "")
     exec_env = dict(os.environ)
-    exec_env.update(_parse_env_file(getattr(args, "env_file", "") or ""))
+    exec_env.update(declared_env)
+    # The shared child's identity belongs to the stub, not an arbitrary
+    # fallback backend. Preserve it only for the package-derived managed
+    # invocation, using the same argv + env proof as discovery. A managed
+    # name alone cannot make spec-authored command text trustworthy.
+    # The wrapper pins the data home even when the original default entry had
+    # no env; include that inherited pin in the proof of the effective env.
+    managed_env = dict(declared_env)
+    if os.environ.get("KIROCREW_HOME"):
+        inherited_home = os.environ["KIROCREW_HOME"]
+        # Match the package's resolved home without normalizing a declared
+        # override into a trusted value. Resolution failure keeps the raw pin;
+        # the verifier's own failed resolution then refuses direct authority.
+        with contextlib.suppress(OSError, RuntimeError):
+            inherited_home = str(Path(inherited_home).expanduser().resolve())
+        managed_env.setdefault("KIROCREW_HOME", inherited_home)
+    if not _is_first_party_managed_argv(
+        getattr(args, "server", ""), args.target_command, target_args, managed_env
+    ):
+        exec_env = {
+            key: value
+            for key, value in exec_env.items()
+            if key.upper() not in {"KIROCREW_SESSION_KEY", "KIROCREW_HOST_PID"}
+        }
     if platform_compat.IS_WINDOWS:
         _fallback_spawn_child(argv, exec_env)
     # exec IS this fallback stub's whole purpose: when the gateway is
@@ -1908,6 +1946,17 @@ async def _amain(argv: Optional[list[str]] = None) -> int:
             pool_label,
         )
         await _safe_close(writer)
+        fallback_exec(args)
+        return 1  # unreachable
+
+    # A surviving pre-feature daemon ignores session_bound, allowing a delayed
+    # parent PID claim to replace a child's key. Require its acknowledgment
+    # before any MCP traffic; the verified direct fallback retains the child key.
+    if payload.get("session_bound") is True and "session_bound_ack" not in _caps:
+        reason = "gateway cannot preserve the explicit session binding"
+        await _safe_close(writer)
+        await alog_fallback(reason, payload["stub_uuid"], pool_label, args)
+        logger.warning("handshake: %s; falling back pool=%s", reason, pool_label)
         fallback_exec(args)
         return 1  # unreachable
 
@@ -2125,7 +2174,7 @@ async def _amain(argv: Optional[list[str]] = None) -> int:
     # Terminal: the bridge ended for a reason no reconnect can address, or the
     # reconnect budget ran out.
     #
-    # Deliberately NOT followed by fallback_exec. The four pre-flight fallback
+    # Deliberately NOT followed by fallback_exec. The pre-flight fallback
     # sites work because kiro-cli's ``initialize`` is still unread in fd0, so the
     # exec'd server comes up initialized. Here stdin_pump has already consumed
     # and forwarded ``initialize``, and kiro-cli never re-sends it, so an exec'd
