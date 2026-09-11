@@ -608,6 +608,21 @@ else
   # the link itself) is left as-is. If the rename itself fails (exotic
   # filesystem), fall back to removing only the stale interpreter links so
   # the rebuild still cannot produce the hybrid.
+  #
+  # Build under a umask that masks group/other WRITE, so bin/kirocrew and its
+  # dirs are born non-group-writable. `kirocrew service install` refuses to
+  # attach its AppArmor unprivileged-userns profile to a launcher whose file --
+  # or any ancestor dir -- is group- or world-writable, since another local
+  # user could plant an executable at that path and inherit the grant. venv/pip
+  # honour the process umask, so a permissive umask (002, common on shared dev
+  # hosts) would otherwise yield a 0775 tree and the profile install would
+  # refuse, recurring on every re-install. Tightening at BIRTH (not with a
+  # post-build chmod) leaves no window in which a same-group user could modify
+  # the tree before it is hardened and blessed. We OR the caller's umask with
+  # 022 so we only ever ADD the write-mask bits -- a stricter umask (e.g. 077)
+  # is preserved, never loosened. Restored before the launcher symlinks below.
+  _KC_PREV_UMASK="$(umask)"
+  umask "$(printf '%03o' "$(( $(umask) | 022 ))")"
   _VENV_BACKUP=""
   if [ -f "$VENV/pyvenv.cfg" ] && [ ! -L "${VENV%/}" ]; then
     _VENV_BACKUP="${VENV%/}.pre-rebuild.$$"
@@ -653,6 +668,9 @@ else
   if [ -n "$_VENV_BACKUP" ] && [ -d "$_VENV_BACKUP" ]; then
     rm -rf "$_VENV_BACKUP" 2>/dev/null || true
   fi
+  # Venv tree is fully built and born non-group-writable; restore the caller's
+  # umask so the launcher symlinks below follow it.
+  umask "$_KC_PREV_UMASK"
   # Keep the stable launch path (`${VENV}-current`) naming the tree that holds
   # the LAST-INSTALLED version. The gateway's shadow-venv updater
   # (kiro_crew/platform/wheel_engine.py) promotes this same symlink to a fresh

@@ -200,6 +200,13 @@ fi
 
 # Backend: venv + pip install -e .
 _venv="$_kirocrew_dir/.venv"
+# Build the venv under a umask that masks group/other WRITE so bin/kirocrew
+# and its dirs are born non-group-writable -- `kirocrew service install`
+# refuses to attach its AppArmor profile to a group/world-writable launcher
+# (see the matching block in cli.sh for the full rationale). OR-ing with 022
+# only ADDS write-mask bits, so a stricter caller umask is preserved.
+_KC_PREV_UMASK="$(umask)"
+umask "$(printf '%03o' "$(( $(umask) | 022 ))")"
 # Same requires-python reuse rule as install.sh: a pre-3.12 venv cannot host the
 # package, so rebuild rather than pip-install into it and hit a hard refusal.
 if [ ! -d "$_venv" ] || [ ! -x "$_venv/bin/python" ] \
@@ -212,6 +219,7 @@ if [ ! -d "$_venv" ] || [ ! -x "$_venv/bin/python" ] \
     fi
     "$_py" -m venv "$_venv" || {
         echo "  ❌ Failed to create venv"
+        umask "$_KC_PREV_UMASK"
         cd - > /dev/null 2>&1
         return 1 2>/dev/null || exit 1
     }
@@ -222,8 +230,10 @@ if KIROCREW_SKIP_FRONTEND=1 "$_venv/bin/pip" install -e "$_kirocrew_dir" -q; the
     echo "  ✅ Build succeeded"
     # Record install method for tooling that branches on it
     echo "pip" > "$_kirocrew_dir/.install-method"
+    umask "$_KC_PREV_UMASK"
 else
     echo "  ❌ pip install failed"
+    umask "$_KC_PREV_UMASK"
     cd - > /dev/null 2>&1
     return 1 2>/dev/null || exit 1
 fi
