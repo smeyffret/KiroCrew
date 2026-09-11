@@ -33,7 +33,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
-import { ArrowLeft, Check, ChevronRight, Circle, Clock, ExternalLink, Goal, MessageCircleQuestionMark, Pencil, Route, Star, UserPlus, Users, Webhook, Zap } from 'lucide-react'
+import { ArrowLeft, Check, ChevronRight, Circle, Clock, ExternalLink, Goal, MessageCircleQuestionMark, Pencil, Plus, Route, Star, UserPlus, Users, Webhook, Zap } from 'lucide-react'
 import { PanelRightSolid } from '../../components/icons/panels'
 import { useTranslation } from 'react-i18next'
 import { api, type MemberRosterRow, type WebhookTokenEntry } from '../../api/client'
@@ -76,7 +76,12 @@ import {
   SORT_OPTIONS, SOURCE_FILTERS, STATUS_FILTERS,
   type MemberSignals, type MemberSort, type MemberSourceFilter, type MemberStatusFilter, type RosterQuery,
 } from './rosterFilter'
-import { Btn } from '../../components/ui'
+import { Btn, SendBtn } from '../../components/ui'
+import {
+  Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle,
+} from '../../components/ui/dialog'
+import JobForm from '../../components/JobForm'
+import { SaveCreateLabel } from '../../utils/cronUtils'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { isSidePanelHidden, shouldMountSidePanel, sidePanelDockMotion } from '../chat/sidePanelMount'
 import SidePanel, { SIDE_PANEL_MIN_W, SIDE_PANEL_RESERVED_W, type SidePanelLeadingTab, type SidePanelWithholdable } from '../chat/SidePanel'
@@ -311,6 +316,89 @@ const PATROL_TICK_MS = 15_000
 /** Stable empty roster for the not-yet-answered read, so the memos keyed on
  *  `members` do not recompute on every render while the first fetch is out. */
 const EMPTY_ROSTER: readonly MemberRosterRow[] = []
+
+/**
+ * "New schedule" for the member whose Crew summary is open.
+ *
+ * A DIALOG rather than the crew editor's inline form (`CrewWakeSection`), for
+ * one reason: a dialog owns its own cancel and confirm, so the typed draft
+ * never becomes the host's problem. The inline form makes its host carry draft
+ * accounting — `onDraftChange` / `onSavingChange` / `onRequestCancel`, feeding a
+ * dirty dot, Save gating and a discard confirm — and this page has no such
+ * model: it is read-only observation whose only writes are starring a member
+ * and opening a thread. Growing one here to host a form would be a second
+ * spelling of the crew editor's, not a smaller change.
+ *
+ * The crew field is LOCKED to the open member: this surface exists because the
+ * member is already the subject, so offering a picker would only be a way to
+ * file the schedule against somebody else. `memberId` is the separate,
+ * load-bearing half — it is what binds the job to that member's PRIVATE memory
+ * rather than Global V1.
+ */
+function MemberScheduleDialog({ member, agentTemplate, saving, onSavingChange, onClose, onSaved }: {
+  member: string
+  /** The member's provider template, so the form can offer that agent's models. */
+  agentTemplate?: string
+  /** Whether the create is in flight. Drives the footer's honesty — the label
+   *  and the caveat — and nothing else: dismissal is never refused, because a
+   *  POST cannot be un-sent and refusing only moved the harm elsewhere. */
+  saving: boolean
+  onSavingChange: (saving: boolean) => void
+  onClose: () => void
+  onSaved: () => void
+}) {
+  const { t } = useTranslation()
+  const submitRef = useRef<(() => void) | null>(null)
+  return (
+    <DialogContent maxWidth={720} className="max-h-[86vh]">
+      <DialogHeader>
+        <DialogTitle className="truncate">
+          {t('pages.membersPage.new_schedule_for', { name: member })}
+        </DialogTitle>
+      </DialogHeader>
+      <DialogBody className="flex flex-col gap-4">
+        {/* `agents=[]` / `defaultAgent=""` are unread under `lockedAgent`, which
+            renders the crew as a fixed value instead of a selector — the same
+            call shape the crew editor's wake pane uses. */}
+        <JobForm
+          layout="vertical"
+          agents={[]}
+          defaultAgent=""
+          lockedAgent={member}
+          /* `member_id: "default"` is refused by the backend as a V1 identity,
+             so the default crew is bound by name only — and its schedule
+             therefore runs on Global V1 memory, not a private store. */
+          memberId={member === 'default' ? undefined : member}
+          providerAgent={agentTemplate}
+          onSaved={onSaved}
+          externalSubmit
+          submitRef={submitRef}
+          onSavingChange={onSavingChange}
+        />
+      </DialogBody>
+      {/* While the create is in flight the exit is still offered, but it stops
+          claiming to cancel: the button says Close and the line beside it says
+          the schedule may still be created. Saying so is what the earlier lock
+          was reaching for — a user who is told cannot be misled — and it costs
+          none of the harm that refusing the exit did. */}
+      <DialogFooter className={saving ? 'justify-between' : undefined}>
+        {saving && (
+          <span className="text-[11px] text-muted" data-testid="member-schedule-inflight">
+            {t('pages.membersPage.schedule_close_wont_cancel')}
+          </span>
+        )}
+        <div className="flex items-center gap-2">
+          <Btn onClick={onClose} data-testid="member-schedule-dismiss">
+            {saving ? t('pages.membersPage.close') : t('pages.membersPage.cancel')}
+          </Btn>
+          <SendBtn onClick={() => submitRef.current?.()} disabled={saving} data-testid="member-schedule-submit">
+            <SaveCreateLabel isEdit={false} saving={saving} />
+          </SendBtn>
+        </div>
+      </DialogFooter>
+    </DialogContent>
+  )
+}
 
 export default function MembersPage() {
   const { t } = useTranslation()
@@ -966,6 +1054,40 @@ export default function MembersPage() {
         : [],
     [active, wakeTokens],
   )
+  // Create-a-schedule dialog. Holds the member NAME it was opened for, not a
+  // bare flag: the dialog binds the job to one member, so it must keep naming
+  // the member it was opened for even if the roster moves underneath it —
+  // re-pointing it at whoever is open now would file the schedule against
+  // somebody the form never claimed. It deliberately does NOT close when the
+  // open member changes: with the name latched that close prevents nothing and
+  // would discard whatever had been typed, with no confirm.
+  //
+  // Dismissal is NEVER refused, and that is a deliberate reversal of two earlier
+  // revisions. A POST cannot be un-sent, so no amount of locking makes "cancel"
+  // true; each attempt to enforce it bought a fresh defect instead — a window
+  // with no exit while a request hung, a silent Escape that read as frozen, and
+  // an escaped request whose late callback closed a NEWER dialog and took its
+  // draft. What the user actually needs is not to be misled, so the dialog says
+  // in words that closing will not cancel the create, and a late completion is
+  // made HARMLESS rather than impossible: see `schedGen`.
+  const [schedFor, setSchedFor] = useState('')
+  const [schedSaving, setSchedSaving] = useState(false)
+  const schedMember = useMemo(
+    () => members.find((m) => m.name === schedFor),
+    [members, schedFor],
+  )
+  // One generation per OPEN, so a callback captured by an abandoned dialog can
+  // be told from the live one. An in-flight create outlives its dialog, and its
+  // `onSaved` still points here; without this, that late success closed whatever
+  // dialog happened to be open and discarded its draft. A stale generation may
+  // still refresh the job list — that is only ever correct, the schedule really
+  // was created — but it may not touch dialog state.
+  const schedGen = useRef(0)
+  const openSchedFor = useCallback((member: string) => {
+    schedGen.current += 1
+    setSchedSaving(false)
+    setSchedFor(member)
+  }, [])
   const { todayCount, weekCount, todayFloorTs, weekFloorTs } = useMemo(() => {
     const midnight = new Date()
     midnight.setHours(0, 0, 0, 0)
@@ -2347,10 +2469,30 @@ export default function MembersPage() {
               )}
             </div>
           )}
-          <div className="text-[11px] font-semibold tracking-wide text-muted mb-1.5 flex items-center">
+          <div className="text-[11px] font-semibold tracking-wide text-muted mb-1.5 flex items-center gap-1">
             <span className="flex-1">{t('pages.membersPage.wake_sources')}</span>
-            {/* Read-only view; managing schedules stays on the Schedule page
-                (same jump idiom as the crew editor's wake pane). */}
+            {/* The one write this block offers: a new schedule bound to THIS
+                member, so the common case does not require finding the member
+                again on another page. Editing an existing one still lives on
+                the Schedule page (the jump beside it), which is where a job's
+                logs, secrets and delete already are.
+
+                LABELLED, unlike its neighbour, because the two do different
+                things — create here vs leave the page — and two bare 12px icons
+                side by side are told apart only by their tooltips. The words
+                also carry the sibling crew editor's own idiom (`<Plus/>` plus
+                "New schedule") onto this surface. */}
+            <button
+              onClick={() => openSchedFor(active.name)}
+              className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:bg-accent/40 text-muted hover:text-text"
+              title={t('pages.membersPage.new_schedule')}
+              data-testid="member-wake-create"
+            >
+              <Plus size={12} className="lucide-inline" aria-hidden="true" />
+              <span className="text-[10.5px] font-normal">{t('pages.membersPage.new_schedule')}</span>
+            </button>
+            {/* Managing an existing schedule stays on the Schedule page (same
+                jump idiom as the crew editor's wake pane). */}
             <button
               onClick={() => navigate('/schedule')}
               className="inline-flex items-center p-0.5 rounded hover:bg-accent/40 text-muted hover:text-text"
@@ -2375,7 +2517,20 @@ export default function MembersPage() {
               />
             </div>
           ) : wakeJobs.length === 0 && wakeHooks.length === 0 && patrolState !== 'active' ? (
-            <div className="text-[11px] text-muted mb-4">{t('pages.membersPage.wake_none')}</div>
+            <div className="text-[11px] text-muted mb-4">
+              {t('pages.membersPage.wake_none')}{' '}
+              {/* The header's 12px icon is the wrong place to LEARN this exists,
+                  and an empty state is exactly where a reader is asking "so how
+                  do I add one?" — so the empty case carries the action in
+                  words, the way the crew editor's own pane labels its Plus. */}
+              <button
+                onClick={() => openSchedFor(active.name)}
+                className="underline decoration-dotted underline-offset-2 hover:text-text"
+                data-testid="member-wake-create-empty"
+              >
+                {t('pages.membersPage.new_schedule')}
+              </button>
+            </div>
           ) : (
             <ul className="list-none m-0 p-0 mb-4 space-y-1.5" data-testid="member-wake-sources">
               {/* An active patrol IS a wake source — the one this member set
@@ -2606,6 +2761,51 @@ export default function MembersPage() {
             </AnimatePresence>
           )
         })()}
+      {/* Page root, not inside the summary body: the panel unmounts on a tab
+          switch and would take a half-typed schedule with it. */}
+      <Dialog
+        open={!!schedFor}
+        /* EVERY dismissal path funnels through here — Escape, a click outside,
+           and the built-in close control alike — so refusing while the create
+           request is in flight is what actually closes the hole the disabled
+           Cancel only half-closed: unmounting the form does not cancel the
+           request, so a dialog dismissed mid-save would still create the
+           schedule it appeared to abandon. */
+        onOpenChange={next => { if (!next) setSchedFor('') }}
+      >
+        {!!schedFor && (() => {
+          // Captured once per open. Every callback this dialog hands out is
+          // stamped with it, so a create that outlives the dialog can be told
+          // from the live one when it finally answers.
+          const gen = schedGen.current
+          return (
+            <MemberScheduleDialog
+              key={`${schedFor}#${gen}`}
+              member={schedFor}
+              /* Undefined while the roster is refetching — the form then offers
+                 the global model list rather than that template's, which is a
+                 narrower field, never a wrong binding: `member` is what the job
+                 is filed under. */
+              agentTemplate={schedMember?.kiro_agent}
+              saving={schedSaving}
+              onSavingChange={(v) => { if (gen === schedGen.current) setSchedSaving(v) }}
+              onClose={() => setSchedFor('')}
+              onSaved={() => {
+                // ALWAYS, whichever generation reports it: the schedule really
+                // was created, so the shared job-list key must refresh — the
+                // wake block, the composer's watch popover and the Schedule
+                // page all read it.
+                queryClient.invalidateQueries({ queryKey: cronJobsQuery.queryKey })
+                // Dialog state, only for the dialog still on screen. A create
+                // the user closed out from under keeps running, and its late
+                // success used to close whatever dialog had replaced it and
+                // discard that draft.
+                if (gen === schedGen.current) { setSchedFor(''); setSchedSaving(false) }
+              }}
+            />
+          )
+        })()}
+      </Dialog>
     </div>
   )
 }

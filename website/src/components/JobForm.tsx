@@ -339,6 +339,14 @@ export default function JobForm({ job, prefill, agents, defaultAgent, rosterFail
         : await api.createCron(body).catch((e: Error) => ({ error: e.message }))
       if (res.error) { setError(res.error); setSaving(false); return }
       if (!job) { setName(''); setMsg(''); setWeekDays([]); setIntVal(1); setChannel(''); setModel(''); setApprovalMode(''); setSilent(false); setStrictSchedule(false); setHideInChat(false); setMinimalContext(false) }
+      // Cleared BEFORE onSaved, so `onSavingChange` is symmetric: it reports
+      // false on EVERY outcome, not only on failure. An asymmetric version made
+      // the flag a host's problem to unlearn — a host that lifts it out of its
+      // own dialog (to refuse a dismissal mid-save, say) never heard about
+      // success, so one successful save left it stuck saving forever. Ordering
+      // matters: onSaved typically unmounts this form, so a clear after it
+      // would not run.
+      setSaving(false)
       onSaved()
     } catch { setError(i18nT('components.jobForm.failed_to_save')); setSaving(false) }
   }

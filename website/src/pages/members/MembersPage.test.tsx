@@ -34,6 +34,10 @@ vi.mock('../../api/client', () => ({
     // keeps the chat-style Summary row out of the menu so the Crew summary tab
     // is the one summary these cases see.
     sessionSummary: vi.fn(() => Promise.resolve({ enabled: false })),
+    // The wake block's create dialog hosts JobForm, whose only two reads are
+    // the model list and the create call itself.
+    models: vi.fn(() => Promise.resolve({ models: [] })),
+    createCron: vi.fn(() => Promise.resolve({ ok: true })),
   },
 }))
 
@@ -1101,6 +1105,124 @@ describe('MembersPage side panel (Crew summary tab) and edit jump', () => {
     expect(list).not.toHaveTextContent('other-crew-job')
     expect(list).not.toHaveTextContent('script-job')
     expect(list).not.toHaveTextContent('unbound-hook')
+  })
+
+  it('the wake block creates a schedule bound to the open member', async () => {
+    await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
+    fireEvent.click(await rosterRow('oncall'))
+    await waitFor(() => expect(screen.queryByTestId('member-wake-loading')).toBeNull())
+    fireEvent.click(screen.getByTestId('member-wake-create'))
+    // The dialog names the member it binds to, and the crew renders as a fixed
+    // value rather than a picker: this surface exists because the member is
+    // already the subject, so there is nothing to choose.
+    await screen.findByText(/new schedule for oncall/i)
+    expect(screen.getByTestId('jobform-locked-agent')).toHaveTextContent('oncall')
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'nightly-triage' } })
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'triage the queue' } })
+    fireEvent.click(screen.getByTestId('member-schedule-submit'))
+    await waitFor(() => expect(api.createCron).toHaveBeenCalled())
+    // `member_id` is the load-bearing half: it is what binds the job to this
+    // member's PRIVATE memory. `agent` carries the member's provider TEMPLATE,
+    // not its name — the two are distinct, and passing `providerAgent` is what
+    // keeps the job running on the same template the member itself uses.
+    const body = vi.mocked(api.createCron).mock.calls[0][0] as Record<string, unknown>
+    expect(body.member_id).toBe('oncall')
+    expect(body.agent).toBe('kirocrew')
+    expect(body.name).toBe('nightly-triage')
+  })
+
+  it('a second dialog opens dismissible after a successful create', async () => {
+    // Explicit, because a sibling case above pins a never-settling create and
+    // mockReturnValue outlives a clearAllMocks.
+    vi.mocked(api.createCron).mockResolvedValue({ ok: true })
+    await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
+    fireEvent.click(await rosterRow('oncall'))
+    await waitFor(() => expect(screen.queryByTestId('member-wake-loading')).toBeNull())
+    // First create, all the way through: JobForm reports saving=false only on a
+    // FAILED submit, so a success leaves the host's flag set unless the host
+    // clears it itself. Left set, it outlives the dialog — and every later one
+    // opens mid-save with no dismissal path at all.
+    fireEvent.click(screen.getByTestId('member-wake-create'))
+    await screen.findByText(/new schedule for oncall/i)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'first-job' } })
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'do the thing' } })
+    fireEvent.click(screen.getByTestId('member-schedule-submit'))
+    await waitFor(() => expect(screen.queryByText(/new schedule for oncall/i)).toBeNull())
+
+    fireEvent.click(screen.getByTestId('member-wake-create'))
+    await screen.findByText(/new schedule for oncall/i)
+    expect(screen.getByTestId('member-schedule-dismiss')).toBeEnabled()
+    fireEvent.click(screen.getByTestId('member-schedule-dismiss'))
+    await waitFor(() => expect(screen.queryByText(/new schedule for oncall/i)).toBeNull())
+  })
+
+  it('the empty wake state offers the create action in words', async () => {
+    vi.mocked(api.crons).mockResolvedValue({ jobs: [] })
+    await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
+    fireEvent.click(await rosterRow('oncall'))
+    // A 12px header icon is not where a reader learns the action exists.
+    const inline = await screen.findByTestId('member-wake-create-empty')
+    expect(inline).toHaveTextContent('New schedule')
+    fireEvent.click(inline)
+    await screen.findByText(/new schedule for oncall/i)
+  })
+
+  it('offers an honest exit while the create is in flight instead of refusing one', async () => {
+    // A create that never settles. Earlier revisions refused every dismissal
+    // here; that produced a window with no exit, a silent Escape, and a stale
+    // callback that closed a later dialog. A POST cannot be un-sent, so the
+    // dialog stops claiming otherwise and says so instead.
+    vi.mocked(api.createCron).mockReturnValue(new Promise(() => {}))
+    await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
+    fireEvent.click(await rosterRow('oncall'))
+    await waitFor(() => expect(screen.queryByTestId('member-wake-loading')).toBeNull())
+    fireEvent.click(screen.getByTestId('member-wake-create'))
+    await screen.findByText(/new schedule for oncall/i)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'hung-job' } })
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'never settles' } })
+    fireEvent.click(screen.getByTestId('member-schedule-submit'))
+    await waitFor(() => expect(api.createCron).toHaveBeenCalled())
+
+    // The exit is offered, relabelled so it does not claim to cancel, next to a
+    // line that states what closing does and does not do.
+    expect(screen.getByTestId('member-schedule-inflight')).toHaveTextContent(/may still be created/i)
+    const dismiss = screen.getByTestId('member-schedule-dismiss')
+    expect(dismiss).toHaveTextContent('Close')
+    expect(dismiss).toBeEnabled()
+    fireEvent.click(dismiss)
+    await waitFor(() => expect(screen.queryByText(/new schedule for oncall/i)).toBeNull())
+  })
+
+  it('a late create cannot close the dialog that replaced it, nor take its draft', async () => {
+    // The corruption path both review lanes named: an escaped request keeps
+    // running, and its captured onSaved still points at the host.
+    let settleFirst: (v: unknown) => void = () => {}
+    vi.mocked(api.createCron).mockReturnValueOnce(new Promise((resolve) => { settleFirst = resolve }))
+    await renderPage([row({ bound: true, slot_key: 'member-oncall' })])
+    fireEvent.click(await rosterRow('oncall'))
+    await waitFor(() => expect(screen.queryByTestId('member-wake-loading')).toBeNull())
+    fireEvent.click(screen.getByTestId('member-wake-create'))
+    await screen.findByText(/new schedule for oncall/i)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'escapes' } })
+    fireEvent.change(screen.getByLabelText('Message'), { target: { value: 'still running' } })
+    fireEvent.click(screen.getByTestId('member-schedule-submit'))
+    await waitFor(() => expect(api.createCron).toHaveBeenCalled())
+    fireEvent.click(screen.getByTestId('member-schedule-dismiss'))
+    await waitFor(() => expect(screen.queryByText(/new schedule for oncall/i)).toBeNull())
+
+    // A SECOND dialog, with a draft in it.
+    vi.mocked(api.createCron).mockResolvedValue({ ok: true })
+    fireEvent.click(screen.getByTestId('member-wake-create'))
+    await screen.findByText(/new schedule for oncall/i)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'typed-later' } })
+
+    // Now the escaped request finally succeeds. It must refresh the list and
+    // touch nothing else: the dialog on screen is not the one it belonged to.
+    await act(async () => { settleFirst({ ok: true }) })
+    expect(screen.getByText(/new schedule for oncall/i)).toBeTruthy()
+    expect(screen.getByLabelText('Name')).toHaveValue('typed-later')
+    // ...and it did not leave the live dialog stuck mid-save either.
+    expect(screen.getByTestId('member-schedule-dismiss')).toHaveTextContent('Cancel')
   })
 
   it('a failed wake-sources fetch renders the error state, never the affirmative empty state', async () => {
