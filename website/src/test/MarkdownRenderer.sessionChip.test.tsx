@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent, screen } from '@testing-library/react'
+import { render, fireEvent, screen, createEvent } from '@testing-library/react'
 
 import MarkdownRenderer from '../components/MarkdownRenderer'
 import { copyToClipboard } from '../utils/clipboard'
@@ -92,6 +92,178 @@ describe('session chip — a bare slot key in prose', () => {
   })
 })
 
+describe('session chip — a SHORT slot name', () => {
+  // How a session is actually named in prose: the sidebar shows it, the agent
+  // tools return it, and nobody types the mint timestamp.
+  const SHORT = 'chat-24'
+
+  it('resolves the short name against the roster and switches on click', () => {
+    render(
+      <MarkdownRenderer
+        content={`Handed it to \`${SHORT}\`.`}
+        onSessionOpen={onSessionOpen}
+        sessions={roster()}
+      />,
+    )
+    const chip = screen.getByText(SHORT)
+    expect(chip).toHaveAttribute('data-session-key', KEY)
+    fireEvent.click(chip)
+    // The FULL key reaches the handler: `?sid=` and the slot switcher both need it.
+    expect(onSessionOpen).toHaveBeenCalledWith(KEY)
+  })
+
+  it('names the session in its tooltip', () => {
+    render(
+      <MarkdownRenderer content={`\`${SHORT}\``} onSessionOpen={onSessionOpen} sessions={roster()} />,
+    )
+    expect(screen.getByText(SHORT).getAttribute('title') ?? '').toContain('Fix the pagination bug')
+  })
+
+  it('copies the FULL key on Ctrl/Cmd+click, not the nickname', () => {
+    render(
+      <MarkdownRenderer content={`\`${SHORT}\``} onSessionOpen={onSessionOpen} sessions={roster()} />,
+    )
+    fireEvent.click(screen.getByText(SHORT), { metaKey: true })
+    expect(copyToClipboard).toHaveBeenCalledWith(KEY)
+    expect(onSessionOpen).not.toHaveBeenCalled()
+  })
+
+  it('leaves a short name no open session answers to as plain text', () => {
+    render(
+      <MarkdownRenderer content={'`chat-777`'} onSessionOpen={onSessionOpen} sessions={roster()} />,
+    )
+    const el = screen.getByText('chat-777')
+    expect(el).not.toHaveAttribute('data-session-key')
+    expect(el).toHaveAttribute('title', 'Click to copy')
+  })
+
+  it('refuses an AMBIGUOUS short name rather than picking one', () => {
+    // Two open slots share slot number 24 across gateway generations. Guessing
+    // would switch the reader to a session they did not name.
+    render(
+      <MarkdownRenderer
+        content={`\`${SHORT}\``}
+        onSessionOpen={onSessionOpen}
+        sessions={new Map([[KEY, 'One'], ['chat-24-1700000000', 'Two']])}
+      />,
+    )
+    expect(screen.getByText(SHORT)).not.toHaveAttribute('data-session-key')
+  })
+
+  it('does not let a shorter number claim a longer slot', () => {
+    render(
+      <MarkdownRenderer
+        content={'`chat-2`'}
+        onSessionOpen={onSessionOpen}
+        sessions={roster()}
+      />,
+    )
+    // The roster holds chat-24-…, which `chat-2` must not claim.
+    expect(screen.getByText('chat-2')).not.toHaveAttribute('data-session-key')
+  })
+
+  it('offers no chip for the short name of the session the reader is in', () => {
+    render(
+      <MarkdownRenderer
+        content={`\`${SHORT}\``}
+        onSessionOpen={onSessionOpen}
+        sessions={roster()}
+        activeSession={KEY}
+      />,
+    )
+    expect(screen.getByText(SHORT)).not.toHaveAttribute('data-session-key')
+  })
+
+  it('stays plain text in prose without backticks', () => {
+    // Prose is not scanned for slot names — the author marks a session as one,
+    // the same as every other chip in this renderer.
+    render(
+      <MarkdownRenderer
+        content={`Handed it to ${SHORT} which is idle.`}
+        onSessionOpen={onSessionOpen}
+        sessions={roster()}
+      />,
+    )
+    expect(document.querySelector('[data-session-key]')).toBeNull()
+  })
+
+  it('switches in place from a short-name DEEP LINK, rather than reloading', () => {
+    // The href resolves, so a plain click must be intercepted. Left ungated on
+    // the full key only, the anchor navigated to the canonical `?sid=` instead,
+    // remounting the whole app to reach a session already open in a tab.
+    render(
+      <MarkdownRenderer
+        content={`[the other session](/chat?sid=${SHORT})`}
+        onSessionOpen={onSessionOpen}
+        sessions={roster()}
+      />,
+    )
+    const link = screen.getByText('the other session')
+    // The attribute is rewritten to the canonical key, so a Cmd+click still lands.
+    expect(link).toHaveAttribute('href', `/chat?sid=${KEY}`)
+    fireEvent.click(link, { button: 0 })
+    expect(onSessionOpen).toHaveBeenCalledWith(KEY)
+  })
+
+  it('refuses a short name whose only match was minted after the message', () => {
+    // KEY's mint time is 1784661951; this message predates it, so the session it
+    // names cannot be this one — a slot number reused by a later generation.
+    render(
+      <MarkdownRenderer
+        content={`\`${SHORT}\``}
+        onSessionOpen={onSessionOpen}
+        sessions={roster()}
+        messageTs="2020-01-01T00:00:00Z"
+      />,
+    )
+    expect(screen.getByText(SHORT)).not.toHaveAttribute('data-session-key')
+  })
+
+  it('still resolves when the message was written after the slot was minted', () => {
+    render(
+      <MarkdownRenderer
+        content={`\`${SHORT}\``}
+        onSessionOpen={onSessionOpen}
+        sessions={roster()}
+        messageTs="2026-09-11T23:39:00Z"
+      />,
+    )
+    expect(screen.getByText(SHORT)).toHaveAttribute('data-session-key', KEY)
+  })
+
+  it('leaves the FULL key alone when the message predates the slot', () => {
+    // A full key names its generation exactly, so there is no aliasing to guard.
+    render(
+      <MarkdownRenderer
+        content={`\`${KEY}\``}
+        onSessionOpen={onSessionOpen}
+        sessions={roster()}
+        messageTs="2020-01-01T00:00:00Z"
+      />,
+    )
+    expect(screen.getByText(KEY)).toHaveAttribute('data-session-key', KEY)
+  })
+
+  it('declines an unresolvable short-name deep link instead of navigating to it', () => {
+    // Symmetry with an unresolvable FULL key: both name a session, so both are
+    // intercepted rather than left to reload the app onto a dead `?sid=` view
+    // (#9914). Shape is what says "this names a session"; the roster only says
+    // whether it is reachable.
+    render(
+      <MarkdownRenderer
+        content={'[a closed session](/chat?sid=chat-777)'}
+        onSessionOpen={onSessionOpen}
+        sessions={roster()}
+      />,
+    )
+    const link = screen.getByText('a closed session')
+    const click = createEvent.click(link, { button: 0 })
+    fireEvent(link, click)
+    expect(click.defaultPrevented).toBe(true)
+    expect(onSessionOpen).not.toHaveBeenCalled()
+  })
+})
+
 describe('session chip — the honesty gates', () => {
   /** Assert the span fell back to the plain click-to-copy chip. */
   const expectCopyChip = (text: string) => {
@@ -138,6 +310,8 @@ describe('session chip — the honesty gates', () => {
   })
 
   it('offers no chip for a string that merely resembles a key', () => {
+    // The roster entries are deliberately not slot keys, so neither span can be
+    // resolved by the full grammar or by the short-name lookup.
     render(
       <MarkdownRenderer
         content={'`chat-24` and `chat-24-1784661951.jsonl`'}

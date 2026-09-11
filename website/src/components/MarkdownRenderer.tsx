@@ -4,7 +4,7 @@ import { HOVER_NONE_ACTIONS_ROW_CLS } from '../utils/touchActions'
 import { getImageDims, rememberImageDims } from '../utils/imageDims'
 import { X, Download, Plus, Minus, Search, Folder, Maximize2, Check, FileCode, Copy, Image as ImageIcon, ImageOff, GitPullRequest, MessageSquare } from 'lucide-react'
 import { copyCode, copyToClipboard } from '../utils/clipboard'
-import { canonicalChatHref, sessionKeyFrom, sessionKeyFromChatHref } from '../utils/sessionKeys'
+import { canonicalChatHref, chatHrefSid, isSessionShortName, sessionKeyFrom, sessionKeyFromShort } from '../utils/sessionKeys'
 import ReactMarkdown from 'react-markdown'
 import type { Components, ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -864,10 +864,20 @@ function MdAnchor({ node, href, children }: React.AnchorHTMLAttributes<HTMLAncho
       sessionCandidate = decodeURIComponent(href)
     } catch { /* keep it a normal link */ }
   }
-  // Whether this href NAMES a same-origin chat session at all, independent of
-  // whether that session is currently reachable (open). A closed/unknown key is
-  // still a chat-session href — it just does not resolve in the open-tabs roster.
-  const sessionHrefKey = sessionCandidate ? sessionKeyFromChatHref(sessionCandidate) : null
+  // The session parameter this href carries, verbatim. Handed to
+  // `resolveSessionChip` below rather than a pre-resolved key, because that
+  // helper owns which spellings name a session — so a short `?sid=chat-1380`
+  // resolves here exactly as the same short name does in a backtick chip.
+  const sessionHrefSid = sessionCandidate ? chatHrefSid(sessionCandidate) : null
+  // Whether this href NAMES a same-origin chat session at all, by SHAPE, and
+  // independent of whether that session is currently reachable (open). A
+  // closed/unknown one is still a chat-session href — it just does not resolve in
+  // the open-tabs roster. Both spellings count: a short name is as recognisable a
+  // session name as a full key, so declining only the full key left an authored
+  // `?sid=chat-9999` to navigate to exactly the dead session view this
+  // interception exists to prevent (#9914).
+  const sessionHrefNamesSession = !!sessionHrefSid
+    && (sessionKeyFrom(sessionHrefSid) !== null || isSessionShortName(sessionHrefSid))
   // Whether this renderer is wired to route sessions at all — the SAME predicate
   // `resolveSessionChip` guards on (`onSessionOpen` AND `sessions`), so the link
   // affordance and the click handler can never disagree. Both must be present:
@@ -879,7 +889,7 @@ function MdAnchor({ node, href, children }: React.AnchorHTMLAttributes<HTMLAncho
   const sessionRouting = !!(sessionActions.onSessionOpen && sessionActions.sessions)
   // Same gate as the inline chip, so a link and a bare key naming one session
   // cannot disagree about whether it is reachable.
-  const sessionLink = sessionHrefKey ? resolveSessionChip(sessionHrefKey, sessionActions) : null
+  const sessionLink = sessionHrefSid ? resolveSessionChip(sessionHrefSid, sessionActions) : null
   // The attribute carries the canonical key: a modified click goes to the browser,
   // and an authored `dashboard_…` sid would open a session `?sid=` cannot resolve.
   const sessionHref = sessionLink && sessionCandidate ? canonicalChatHref(sessionCandidate, sessionLink.key) : null
@@ -906,7 +916,7 @@ function MdAnchor({ node, href, children }: React.AnchorHTMLAttributes<HTMLAncho
     if (sessionLink) {
       e.preventDefault()
       sessionActions.onSessionOpen!(sessionLink.key)
-    } else if (sessionHrefKey && sessionRouting) {
+    } else if (sessionHrefNamesSession && sessionRouting) {
       e.preventDefault()
     }
   }
@@ -1004,11 +1014,14 @@ function MdAnchor({ node, href, children }: React.AnchorHTMLAttributes<HTMLAncho
       {...sp(node)}
       href={sessionHref ?? href}
       // A `/chat?sid=` href is never a path, so the session branch wins outright.
-      // `sessionHrefKey` (not `sessionLink`) gates the handler so a session link
-      // that does not resolve — a closed/unknown key, or the active session's own
-      // key — is still intercepted and declined rather than left to navigate the
-      // browser to a dead `?sid=` view (#9914) or a duplicate tab.
-      onClick={sessionHrefKey ? onSessionClick : (pathResolution.candidate ? onPathClick : undefined)}
+      // One predicate gates the handler, because a link that RESOLVES necessarily
+      // names a session by shape too — so the two branches inside the handler
+      // split the same population rather than needing different gates: resolvable
+      // switches in place, and one that names a session but does not resolve (a
+      // closed or unknown key, a short name no open session answers to, or the
+      // active session's own key) is intercepted and declined rather than left to
+      // navigate the browser to a dead `?sid=` view (#9914) or a duplicate tab.
+      onClick={sessionHrefNamesSession ? onSessionClick : (pathResolution.candidate ? onPathClick : undefined)}
       title={sessionLink
         ? `${sessionLink.title}\n${i18nT('components.markdownRenderer.click_to_switch_to_this_session')}`
         : undefined}
@@ -1063,6 +1076,11 @@ type SessionActions = {
   onSessionOpen?: (key: string) => void
   sessions?: ReadonlyMap<string, string>
   activeSession?: string
+  /** Epoch seconds this message was written at, when the host knows it. Only the
+   *  SHORT-name lookup uses it, to refuse a slot minted after the text naming it
+   *  (see `sessionKeyFromShort`); absent on surfaces that render markdown with no
+   *  message identity, where the check is skipped. */
+  writtenAtEpoch?: number
 }
 const SessionActionCtx = createContext<SessionActions>({})
 
@@ -1080,10 +1098,16 @@ const SessionActionCtx = createContext<SessionActions>({})
  *     not honour a chip here;
  *   - the key names the session the reader is ALREADY in, where a click would be
  *     a visible no-op.
+ *
+ * A SHORT name (`chat-1380`, no timestamp) resolves through the same roster. The
+ * roster was already the authority for whether a chip may exist, so letting it
+ * also say which session a nickname means adds no new trust: a name it does not
+ * answer for is refused by the second rule above, like any other unknown key.
  */
 function resolveSessionChip(raw: string, actions: SessionActions): { key: string; title: string } | null {
   if (!actions.onSessionOpen || !actions.sessions) return null
   const key = sessionKeyFrom(raw)
+    ?? sessionKeyFromShort(raw, actions.sessions.keys(), actions.writtenAtEpoch)
   if (!key || key === actions.activeSession) return null
   const title = actions.sessions.get(key)
   if (title === undefined) return null
@@ -3990,8 +4014,20 @@ export default memo(function MarkdownRenderer({ content, streaming = false, onFi
    *  this component does. */
   const pathActions = useMemo<PathActions>(() => ({ onFileOpen, onFolderOpen }), [onFileOpen, onFolderOpen])
   const sessionActions = useMemo<SessionActions>(
-    () => ({ onSessionOpen, sessions, activeSession }),
-    [onSessionOpen, sessions, activeSession],
+    // `messageTs` is an ISO timestamp; an unparseable or absent one yields
+    // undefined, which SKIPS the mint check rather than refusing every short name
+    // — the check exists to reject an impossible match, not to gate the feature on
+    // a timestamp being present.
+    () => {
+      const written = messageTs ? Date.parse(messageTs) : NaN
+      return {
+        onSessionOpen,
+        sessions,
+        activeSession,
+        writtenAtEpoch: Number.isNaN(written) ? undefined : Math.floor(written / 1000),
+      }
+    },
+    [onSessionOpen, sessions, activeSession, messageTs],
   )
 
   // Pre-compute the widget index for each widget block (0-based ordinal of

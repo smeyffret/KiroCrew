@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { canonicalChatHref, sessionKeyFrom, sessionKeyFromChatHref } from './sessionKeys'
+import { canonicalChatHref, chatHrefSid, sessionKeyFrom, sessionKeyFromChatHref, sessionKeyFromShort } from './sessionKeys'
 import { sessionRefUrl } from './sessionRefs'
 import { buildShareableUrl } from './shareUrl'
 
@@ -168,6 +168,143 @@ describe('sessionKeyFromChatHref', () => {
     // The refusal must be scoped to message targeting, not to any extra parameter.
     expect(sessionKeyFromChatHref('/chat?sid=chat-24-1784661951&tab=activity'))
       .toBe('chat-24-1784661951')
+  })
+})
+
+describe('sessionKeyFromShort', () => {
+  const ROSTER = ['chat-1380-1789049480', 'chat-138-1700000000', 'chat-7-1699999999']
+
+  it('resolves a short name to the one open slot that answers to it', () => {
+    expect(sessionKeyFromShort('chat-1380', ROSTER)).toBe('chat-1380-1789049480')
+  })
+
+  it('does not let a shorter number claim a longer one', () => {
+    // The separator is part of the prefix. Without it `chat-138` also matches
+    // `chat-1380-…`, which is a different conversation.
+    expect(sessionKeyFromShort('chat-138', ROSTER)).toBe('chat-138-1700000000')
+  })
+
+  it('strips the prefixed spellings, like the full grammar', () => {
+    expect(sessionKeyFromShort('dashboard_chat-7', ROSTER)).toBe('chat-7-1699999999')
+    expect(sessionKeyFromShort('dashboard:chat-7', ROSTER)).toBe('chat-7-1699999999')
+  })
+
+  it('trims surrounding whitespace', () => {
+    expect(sessionKeyFromShort('  chat-7\n', ROSTER)).toBe('chat-7-1699999999')
+  })
+
+  it('refuses a name no open session answers to', () => {
+    // The roster is the sole authority: an unknown nickname stays plain text for
+    // the same reason an unknown full key does.
+    expect(sessionKeyFromShort('chat-999', ROSTER)).toBeNull()
+  })
+
+  it('refuses an AMBIGUOUS name rather than guessing', () => {
+    // A slot number is reused across gateway generations, so two open slots can
+    // share one number. Either choice would open a session the reader did not name.
+    expect(sessionKeyFromShort('chat-1380', ['chat-1380-1789049480', 'chat-1380-1700000000']))
+      .toBeNull()
+  })
+
+  it('refuses an empty roster', () => {
+    expect(sessionKeyFromShort('chat-1380', [])).toBeNull()
+  })
+
+  it('ignores a roster entry that is not a slot key', () => {
+    // The roster also carries channel and cron keys; only a `chat-<n>-<ts>` slot
+    // can be switched to.
+    expect(sessionKeyFromShort('chat-1380', ['slack:1789049480.001', 'cron_f353f9f6'])).toBeNull()
+  })
+
+  it('ignores an entry that carries the prefix but not the key SHAPE', () => {
+    // Reaches the shape test, which the two entries above never do — they are
+    // rejected on the prefix. A transcript filename and a non-numeric tail both
+    // start with `chat-1380-` and neither names a switchable slot.
+    expect(sessionKeyFromShort('chat-1380', ['chat-1380-1789049480.jsonl'])).toBeNull()
+    expect(sessionKeyFromShort('chat-1380', ['chat-1380-abc'])).toBeNull()
+    // And a malformed sibling must not shadow the real one.
+    expect(sessionKeyFromShort('chat-1380', ['chat-1380-abc', 'chat-1380-1789049480']))
+      .toBe('chat-1380-1789049480')
+  })
+
+  it.each([
+    ['chat-1380-1789049480', 'a FULL key is not a short name'],
+    ['chat-', 'no slot number'],
+    ['chat-abc', 'non-numeric slot'],
+    ['session-1380', 'wrong prefix'],
+    ['xchat-1380', 'prefix collision'],
+    ['see chat-1380 for details', 'only part of the span'],
+    ['', 'empty string'],
+  ])('refuses %s (%s)', (raw) => {
+    expect(sessionKeyFromShort(raw, ROSTER)).toBeNull()
+  })
+
+  it('accepts a Map keySet, which is the roster the renderer holds', () => {
+    // `SessionActions.sessions` is a key→title Map; this is the real call shape.
+    const sessions = new Map([['chat-1380-1789049480', 'PR 9223 container runtime']])
+    expect(sessionKeyFromShort('chat-1380', sessions.keys())).toBe('chat-1380-1789049480')
+  })
+
+  describe('the mint-time guard, for a collision across TIME', () => {
+    // The ambiguity check only sees a collision while BOTH generations are open.
+    // Once the older slot closes, one match remains and it is the wrong one.
+    const LATER = ['chat-1380-1789049480']       // minted at 1789049480
+    const WRITTEN_BEFORE = 1789000000            // ... by a message written earlier
+
+    it('refuses a slot minted AFTER the text naming it was written', () => {
+      expect(sessionKeyFromShort('chat-1380', LATER, WRITTEN_BEFORE)).toBeNull()
+    })
+
+    it('accepts a slot minted before, or in the same second as, the text', () => {
+      expect(sessionKeyFromShort('chat-1380', LATER, 1789049481)).toBe('chat-1380-1789049480')
+      expect(sessionKeyFromShort('chat-1380', LATER, 1789049480)).toBe('chat-1380-1789049480')
+    })
+
+    it('picks the generation the message could actually have meant', () => {
+      // Both open, same slot number: ambiguous with no time, decided with it.
+      const both = ['chat-1380-1700000000', 'chat-1380-1789049480']
+      expect(sessionKeyFromShort('chat-1380', both)).toBeNull()
+      expect(sessionKeyFromShort('chat-1380', both, 1789000000)).toBe('chat-1380-1700000000')
+    })
+
+    it('skips the check when the caller does not know the time', () => {
+      // Absent time must not gate the feature; it only rejects an impossible match.
+      expect(sessionKeyFromShort('chat-1380', LATER, undefined)).toBe('chat-1380-1789049480')
+    })
+
+    it('does not apply to a FULL key, which names its generation exactly', () => {
+      expect(sessionKeyFrom('chat-1380-1789049480')).toBe('chat-1380-1789049480')
+    })
+  })
+})
+
+describe('chatHrefSid', () => {
+  it('returns the session parameter verbatim, unresolved', () => {
+    // The caller decides which spellings name a session, so a short sid comes
+    // back as authored instead of being refused by the full-key grammar.
+    expect(chatHrefSid('/chat?sid=chat-1380')).toBe('chat-1380')
+    expect(chatHrefSid('/chat?sid=dashboard_chat-24-1784661951')).toBe('dashboard_chat-24-1784661951')
+  })
+
+  it('applies the same href gates the resolved reader does', () => {
+    expect(chatHrefSid('https://elsewhere.example/chat?sid=chat-24-1784661951')).toBeNull()
+    expect(chatHrefSid('/chat?sid=chat-24-1784661951&mid=abc123')).toBeNull()
+    expect(chatHrefSid('/chats?sid=chat-24-1784661951')).toBeNull()
+    expect(chatHrefSid('/chat')).toBeNull()
+  })
+
+  it('is the sole gate sessionKeyFromChatHref adds the key grammar to', () => {
+    // Pins the composition, so the two readers cannot drift apart on which hrefs
+    // they accept.
+    for (const href of [
+      '/chat?sid=chat-24-1784661951',
+      '/chat?sid=chat-1380',
+      '/chat?sid=nonsense',
+      'https://elsewhere.example/chat?sid=chat-24-1784661951',
+    ]) {
+      const sid = chatHrefSid(href)
+      expect(sessionKeyFromChatHref(href)).toBe(sid ? sessionKeyFrom(sid) : null)
+    }
   })
 })
 
