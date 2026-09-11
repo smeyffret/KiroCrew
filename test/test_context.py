@@ -1550,6 +1550,35 @@ class TestMemoryGetContextQueryWiring:
         msg, _ = builder.build_message("q", True, "s1")
         assert "JSONL-SENTINEL" in msg
 
+    def test_withheld_only_vector_store_still_yields_jsonl_lessons(self, tmp_path):
+        from kiro_crew.learn import Lesson
+        from kiro_crew.vector_memory import VectorMemoryStore
+
+        builder = self._builder(tmp_path)
+        memory = builder.get_memory_for(None)
+        vector_store = VectorMemoryStore(db_path=tmp_path / "vectors.db", embedding_dim=4)
+        vector_store.init()
+        try:
+            memory._vector_store = vector_store
+            vector_store.set_semantic(
+                "lesson.legacyvolatile",
+                {
+                    "rule": "The current model identity is gpt-5.6-sol.",
+                    "category": "preference",
+                    "negative": None,
+                },
+                1.0,
+                "user_explicit",
+            )
+            builder.lessons.save(Lesson(ts="t", rule="JSONL-SENTINEL", category="tool"))
+
+            msg, _ = builder.build_message("q", True, "s1")
+
+            assert "JSONL-SENTINEL" in msg
+            assert "gpt-5.6-sol" not in msg
+        finally:
+            vector_store.close()
+
     def test_episodic_injected_exactly_once(self, tmp_path):
         from types import SimpleNamespace
 

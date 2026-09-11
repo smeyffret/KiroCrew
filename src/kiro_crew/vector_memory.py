@@ -64,6 +64,7 @@ from kiro_crew import memory_record_metadata as record_meta
 from kiro_crew import memory_schema, memory_stores, memory_v2, platform_compat
 from kiro_crew.config import live
 from kiro_crew.config.loader import config_dir
+from kiro_crew.lesson_validation import contains_volatile_lesson_fact
 from kiro_crew.memory_stores import MEMORY_DB_FILE
 from kiro_crew.metrics.db_metrics import timed
 from kiro_crew.project_scope import (
@@ -706,6 +707,28 @@ def _lesson_display_text(decoded: object) -> str:
             return f"{rule.strip()}{_LESSON_NEGATIVE_SEP}{negative.strip()}"
         return rule.strip()
     return ""
+
+
+def _renderable_lesson_text(decoded: object) -> str:
+    """Return prompt text only for a row that may count as lesson population.
+
+    Population and rendering must reject the same malformed, withheld, and
+    volatile legacy rows. Otherwise a row that renders nothing can still make the
+    vector store authoritative and silently suppress valid JSONL lessons.
+    Repository scope is applied later because a valid out-of-project row still
+    proves that the vector store is populated.
+    """
+    text = _lesson_display_text(decoded)
+    if not text:
+        return ""
+    fields = _lesson_fields(decoded)
+    rule, negative = fields if fields is not None else (text, None)
+    category = decoded.get("category") if isinstance(decoded, dict) else None
+    if contains_volatile_lesson_fact(rule, negative, category):
+        return ""
+    if _lesson_scope_unusable(decoded):
+        return ""
+    return text
 
 
 def _lesson_embed_text(decoded: object) -> str:
@@ -2297,9 +2320,7 @@ class VectorMemoryStore:
         # concurrent re-write of the same key a no-op here — the later writer
         # persists its own vector.
         already_embedded = bool(
-            existing
-            and existing["value_json"] == value_json
-            and existing["embedding"] is not None
+            existing and existing["value_json"] == value_json and existing["embedding"] is not None
         )
         if self.embed_fn is not None and not key.startswith("lesson.") and not already_embedded:
             embed_generation = self._space_generation
@@ -3583,9 +3604,7 @@ class VectorMemoryStore:
                 # One mat-vec over every surviving row (both sides are
                 # pre-normalized → the dot product IS the cosine similarity).
                 # float32 matches the stored dtype and the FAISS path.
-                mat = np.frombuffer(b"".join(blobs), dtype=np.float32).reshape(
-                    len(blobs), q_len
-                )
+                mat = np.frombuffer(b"".join(blobs), dtype=np.float32).reshape(len(blobs), q_len)
                 sims: list[float] = [float(s) for s in mat @ np.asarray(q, dtype=np.float32)]
             else:
                 sims = []
@@ -4362,7 +4381,14 @@ class VectorMemoryStore:
         as ``rule_emb_generation``, so a model swap landing between that embed and
         this write is detected and the vector is left NULL for the backfill
         instead of being committed into the wrong space.
+
+        Volatile runtime identity and concrete model pins in either persisted field
+        are refused here, before embedding or deduplication. The JSONL fallback calls
+        the same predicate, so MCP, dashboard, consolidation, task-runner, and direct
+        callers share the boundary.
         """
+        if contains_volatile_lesson_fact(rule, negative, category):
+            return LessonWriteResult(LessonWriteOutcome.REFUSED, "volatile_session_fact")
         rule_lower = rule.lower()
         # lower(), deliberately NOT casefold(). casefold() maps ß to ss, which matches
         # "Straße" against "STRASSE" -- but the same mapping makes "Maße" and "Masse"
@@ -4747,9 +4773,7 @@ class VectorMemoryStore:
                     )
                     if existing_emb:
                         row_blob = struct.pack(f"{len(existing_emb)}f", *existing_emb)
-                        pending_backfills.append(
-                            (row_blob, existing["key"], backfill_generation)
-                        )
+                        pending_backfills.append((row_blob, existing["key"], backfill_generation))
                         existing["embedding"] = row_blob
                     else:
                         existing["_authority_prepass_embed_failed"] = True
@@ -4943,9 +4967,7 @@ class VectorMemoryStore:
                         # ``substring_covered`` refusal -- that composition
                         # predates this change and is reported via
                         # ``superseded``.
-                        deferred_semantic.append(
-                            (existing["key"], existing_report, sim)
-                        )
+                        deferred_semantic.append((existing["key"], existing_report, sim))
                         continue
 
         # Execute the semantic supersedes the scan deferred: reachable only
@@ -4958,9 +4980,7 @@ class VectorMemoryStore:
                 key,
                 d_key,
             )
-            pending_backfills[:] = [
-                (b, k, g) for b, k, g in pending_backfills if k != d_key
-            ]
+            pending_backfills[:] = [(b, k, g) for b, k, g in pending_backfills if k != d_key]
             superseded.append(d_report)
             self.delete_semantic(d_key, source)
 
@@ -5118,26 +5138,24 @@ class VectorMemoryStore:
         answered and the JSONL store must stay silent.
 
         A ``lesson.*`` key is not sufficient evidence. ``set_semantic`` accepts any
-        object, so an import or a legacy migration can leave a list or a rule-less
-        dict under one -- which every renderer already skips. Counting such a row as
-        population would silence the JSONL store while nothing renders, so saved
-        corrections would vanish. The decode is the same one the renderer uses.
+        object, so an import or a legacy migration can leave a list, a rule-less
+        dict, malformed scope, or volatile pre-boundary row under one. Every
+        renderer skips those rows. Counting one as population would silence the
+        JSONL store while nothing renders, so saved corrections would vanish. The
+        shared predicate keeps this authority check aligned with rendering.
 
         Selects ``value_json`` only, never ``SELECT *``: reading every embedding
         blob is the duplicate-SELECT cost the rendering path was written to avoid.
         """
         rows = self._fetch_all_locked(
-            "SELECT value_json FROM semantic_memory "
-            "WHERE is_deleted = 0 AND key LIKE 'lesson.%'"
+            "SELECT value_json FROM semantic_memory " "WHERE is_deleted = 0 AND key LIKE 'lesson.%'"
         )
         for row in rows:
             try:
                 decoded = json.loads(row["value_json"])
             except (ValueError, TypeError):
                 continue
-            if _lesson_scope_unusable(decoded):
-                continue
-            if _lesson_display_text(decoded):
+            if _renderable_lesson_text(decoded):
                 return True
         return False
 
@@ -5219,12 +5237,10 @@ class VectorMemoryStore:
         entries: list[tuple[dict, str]] = []
         for row in self._eligible_rows(self.get_lessons(), "directive"):
             decoded = json.loads(row["value_json"])
-            text = _lesson_display_text(decoded)
+            text = _renderable_lesson_text(decoded)
             if not text:
                 continue
             scope = _lesson_scope(decoded)
-            if _lesson_scope_unusable(decoded):
-                continue
             if scope and not project_scope_satisfied(scope, project_dir):
                 continue
             entries.append((row, text))
