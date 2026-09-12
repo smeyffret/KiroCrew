@@ -18,7 +18,7 @@ import zipfile
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Iterable, Iterator
 from uuid import uuid4
 
 from kiro_crew import memory_stores, platform_compat
@@ -74,7 +74,7 @@ def backup_directory(db_path: Path) -> Path:
     root = memory_stores.memory_stores_root().resolve()
     name = db_path.parent.name
     memory_stores.validate_memory_store_name(name)
-    target = root / ".member-backups" / name
+    target = root / memory_stores.MEMBER_BACKUPS_DIR_NAME / name
     if target.resolve() != target:
         raise ValueError("Member backup directory is redirected")
     return target
@@ -129,6 +129,110 @@ def release_store_use_lock(fd: int | None) -> None:
         platform_compat.release_lock(fd)
     finally:
         os.close(fd)
+
+
+def stores_in_use(stores_root: Path) -> list[str]:
+    """Names of the stores under *stores_root* whose lifetime lock is held right now.
+
+    A probe -- the lock is released as soon as it is answered -- so it reports, never
+    guards: a store opened a moment later is not held off. :func:`hold_stores_for_replace`
+    is the barrier; this is the question it asks first, kept separately because the
+    answer is what the operator is told. Only stores that have ever taken the lock have a
+    lock file, which is why absence means "not in use" rather than "unknown". Windows
+    answers ``[]``: no V2 store takes the lock there (see :func:`acquire_store_use_lock`),
+    and SQLite denies removing an open database's directory outright, so a removal fails
+    loudly on its own instead of succeeding into silent loss.
+    """
+    if not platform_compat.IS_POSIX:
+        return []
+    root = stores_root / memory_stores.MEMBER_BACKUPS_DIR_NAME
+    if not root.is_dir():
+        return []
+    held: list[str] = []
+    for lock_path in sorted(root.glob(f"*/{_STORE_USE_LOCK}")):
+        name = lock_path.parent.name
+        if memory_stores.memory_store_name_defect(name) is not None:
+            continue
+        try:
+            fd = os.open(lock_path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            continue
+        try:
+            with platform_compat.file_lock(fd, exclusive=True, required=True, wait=False):
+                pass
+        except BlockingIOError:
+            held.append(name)
+        except OSError:
+            # An unlockable file is not evidence the store is open; the removal that
+            # follows answers for the file itself.
+            continue
+        finally:
+            os.close(fd)
+    return held
+
+
+class StoresInUse(RuntimeError):
+    """Some of the stores a replace must own are open in another process right now."""
+
+    def __init__(self, names: list[str]) -> None:
+        self.names = names
+        super().__init__(", ".join(names))
+
+
+@contextmanager
+def hold_stores_for_replace(stores_root: Path, names: Iterable[str]) -> Iterator[None]:
+    """Hold every named store's lifetime lock EXCLUSIVELY for the body's duration.
+
+    The replace half of a snapshot restore removes each store directory and refills it
+    from the archive, and POSIX lets an open SQLite handle outlive that removal: a process
+    that opened the store keeps writing into an unlinked file whose rows vanish at its
+    next restart. :func:`acquire_store_use_lock` exists for this -- every open V2 store
+    holds its lock SHARED for the connection's lifetime -- so taking the EXCLUSIVE lock is
+    both the question and the barrier. A store already open makes the acquisition fail
+    at once (:class:`StoresInUse`, nothing has been touched); a store opened WHILE this is
+    held blocks inside ``acquire_store_use_lock`` until the body returns, and then opens
+    whatever the replace put there. A probe alone left exactly that second case open: a
+    cold store opened between the probe and the removal was unlinked with its writer
+    attached.
+
+    Two things make the barrier real rather than nominal. The lock file is opened (and
+    created, for a store that has never been opened -- *names* should cover the stores
+    the ARCHIVE brings as well as the live ones) through the same
+    :func:`_open_store_use_lock` the openers use, so both sides contend on one inode. And
+    the caller must leave ``.member-backups/`` in place across the replace: the inode this
+    holds is the file at that path, and removing it would let a new opener create a fresh,
+    unheld one beside the held handle.
+
+    No-op on Windows, where no store takes the lock and the OS denies the removal itself.
+    """
+    if not platform_compat.IS_POSIX:
+        yield
+        return
+    wanted = sorted({n for n in names if memory_stores.memory_store_name_defect(n) is None})
+    fds: list[int] = []
+    busy: list[str] = []
+    try:
+        for name in wanted:
+            fd = _open_store_use_lock(stores_root / name / memory_stores.MEMORY_DB_FILE)
+            try:
+                taken = platform_compat.try_acquire_lock(fd, exclusive=True)
+            except BaseException:
+                os.close(fd)
+                raise
+            if not taken:
+                os.close(fd)
+                busy.append(name)
+                continue
+            fds.append(fd)
+        if busy:
+            raise StoresInUse(busy)
+        yield
+    finally:
+        for fd in fds:
+            try:
+                platform_compat.release_lock(fd)
+            finally:
+                os.close(fd)
 
 
 @contextmanager

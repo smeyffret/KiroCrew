@@ -31,7 +31,7 @@ Both commands refuse to run on a platform that cannot open a directory relative 
 
 | Component | Files |
 |-----------|-------|
-| memory | `memory.db`, `memory_index.db`, `workspace/memory/`, `workspace/knowledge/` |
+| memory | `memory.db`, `memory_index.db`, `workspace/memory/`, `workspace/knowledge/`, `memory_stores/` |
 | crons | `crons.json` |
 | config | `config.json`, `session_map.json`, `hooks.json`, `project_dir`, `workspace_dir` |
 | skills | `skills/` directory |
@@ -47,6 +47,17 @@ stages the shared paths once.
 
 `workspace/hygiene_data/` and `workspace/insert_facts*.py` are excluded: they are
 large and regenerable.
+
+`memory_stores/` holds every **named memory store**: one directory per crew member,
+each with its own markdown memory, lessons, FTS index, vector database and
+ownership manifest. All of that rides with `memory`. Three kinds of entry under
+the tree are this machine's runtime state rather than memory and never ride, in
+either direction: the member signing key (`memory_stores/.member-api-key`,
+regenerated on the restoring host like `sel_hmac.key`), the private execution
+logs (`memory_stores/.execution-logs/`), and the local rolling backups
+(`memory_stores/.member-backups/` and a named store's own `backups/`, which hold
+that host's recovery copies and any pending-restore journal). A restore drops
+them if a hand-built archive carries them.
 
 The security event log's HMAC key (`sel_hmac.key`) is deliberately **excluded**
 from every snapshot, and is regenerated on the restoring host. That keeps each
@@ -202,6 +213,35 @@ knowledge library are:
 - `--mode replace`, which takes the snapshot's knowledge database whole; or
 - restore onto a machine that has no knowledge database yet, where nothing is
   being merged and the snapshot's copy lands directly.
+
+A named store's `memory_stores/<name>/memory.db` follows the same file rule: a
+store the receiving machine already has keeps its database, and the restore
+names each store it kept. A store the receiving machine lacks is installed whole.
+
+#### Replace refuses while a named store is open
+
+A named store that some process still has open would survive the replacement as
+an unlinked file, and that process would keep writing memory nothing will ever
+read again. `--mode replace` therefore takes each store's lifetime lock for the
+whole replace and refuses, before changing anything, when one is already held:
+stop the gateway (`kirocrew stop`) and any other process using the store, then
+re-run. A store that something tries to open during the replace waits for it to
+finish. The dashboard import answers the same refusal with its reason instead of
+applying.
+
+Because those locks live under `memory_stores/.member-backups/`, replace clears
+`memory_stores/` store by store and leaves its host-local entries
+(`.member-backups/`, `.execution-logs/`, `.member-api-key`) in place, the way the
+default store's `<home>/backups/` is left in place.
+
+#### Replace and snapshots taken before named stores were backed up
+
+Replace makes each memory tree match the archive, so a store directory the
+archive does not carry is removed (into the `pre-restore-*` rollback directory).
+The one exception is a snapshot whose `MANIFEST.json` predates version 4:
+those were written before the tree was part of `memory`, so their silence says
+nothing about the source. Replacing from one leaves the live named stores exactly
+as they are and prints a line saying so, while the rest of `memory` is replaced.
 ### Options
 
 | Flag | Description |
@@ -218,8 +258,9 @@ After a restore, run `kirocrew restart` so the gateway picks up the new state.
 ### Integrity check
 
 In `replace` mode every database the snapshot carries is checked **before any live
-state is touched** — `memory.db`, `memory_index.db`, and
-`workspace/knowledge/knowledge.db`. A snapshot whose database is unreadable or
+state is touched** — `memory.db`, `memory_index.db`,
+`workspace/knowledge/knowledge.db`, and every named store's
+`memory_stores/<name>/memory.db` and `memory_index.db`. A snapshot whose database is unreadable or
 fails its integrity check is refused with a non-zero exit and nothing is
 replaced, so a corrupt archive cannot leave the data home sitting on it. This
 matters most for a bundle fetched from S3, which is untrusted input regardless of

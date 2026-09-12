@@ -174,7 +174,7 @@ class TestExport:
     def test_export_creates_valid_zip(self, patched_config_dir):
         zip_bytes, manifest = create_export_zip()
         assert len(zip_bytes) > 0
-        assert manifest["version"] == 2
+        assert manifest["version"] == portability.EXPORT_MANIFEST_VERSION
         assert manifest["format"] == "zip"
         assert "created_at" in manifest
         assert "hostname" in manifest
@@ -1092,7 +1092,7 @@ class TestValidate:
             ok, error, manifest = validate_import_zip(Path(tmp.name))
             assert ok is True
             assert error == ""
-            assert manifest["version"] == 2
+            assert manifest["version"] == portability.EXPORT_MANIFEST_VERSION
         finally:
             os.unlink(tmp.name)
 
@@ -1999,8 +1999,18 @@ async def test_import_handler_outcome_reflects_a_refused_merge(
     async def _fake_read_upload(request):
         return upload, None
 
-    req = make_mocked_request("POST", "/api/portability/import?mode=merge")
-    req["user"] = "tester"
+    # The route is owner-gated, so the request carries the owner shape the gate reads
+    # (`dashboard_owner_helpers`): a state with no configured owner and the signed local
+    # bootstrap subject as the caller. Without it the test fails on the gate, not on
+    # the audit outcome it names.
+    from aiohttp import web
+    from dashboard_owner_helpers import NoConfiguredOwner
+
+    app = web.Application()
+    app["state"] = NoConfiguredOwner()
+    req = make_mocked_request("POST", "/api/portability/import?mode=merge", app=app)
+    req["user"] = "local-app"
+    req["app"] = ""
     with patch.object(ph, "_read_upload_file", _fake_read_upload):
         with patch.object(ph, "validate_import_zip", lambda p: (True, "", {"version": 2})):
             with patch.object(ph, "apply_import_zip", lambda p, m: summary):

@@ -21,9 +21,11 @@ paths:
 
 :func:`memory_index_path_for` answers a third question and does NOT follow the
 markdown root: the DEFAULT store's FTS index stays in the data-home root, beside
-``memory.db``, because that is the only location the snapshot ``memory``
-component, ``portability``'s export zip and ``scripts/sync-to-remote.sh`` name.
-A NAMED store's index does live inside its own directory.
+``memory.db``, because that is the location the snapshot ``memory`` component,
+``portability``'s export zip and ``scripts/sync-to-remote.sh`` name for it. A
+NAMED store's index does live inside its own directory, and the first two of
+those consumers carry the whole ``memory_stores/`` tree (minus the host-local
+entries :func:`is_host_local_store_state` names).
 
 Nothing here moves data. A named store starts EMPTY; nothing is copied or
 inferred from the default store.
@@ -48,7 +50,7 @@ import re
 import shutil
 import tempfile
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,24 @@ DEFAULT_MEMORY_STORE = "default"
 #: resolvers must spell it identically — this module's
 #: :func:`resolve_store_path` and ``vector_memory``'s own default.
 MEMORY_DB_FILE = "memory.db"
+
+#: Entries under ``memory_stores/`` that are THIS HOST's runtime state rather than
+#: anyone's memory, spelled here so the writers and the backup tools agree on them.
+#: A bundle (``kirocrew snapshot``, the dashboard export) never carries them in
+#: either direction: the signing key is regenerated on the restoring host exactly
+#: as ``sel_hmac.key`` is, the execution logs are per-process diagnostics of runs
+#: that happened here, and the backup directories are the local rolling-durability
+#: copies plus their pending-restore journals -- the default store's own
+#: ``<home>/backups/`` is outside every snapshot component for the same reason.
+MEMBER_API_KEY_FILE = ".member-api-key"
+MEMBER_BACKUPS_DIR_NAME = ".member-backups"
+EXECUTION_LOGS_DIR_NAME = ".execution-logs"
+#: A NAMED V1 store's rolling backups sit inside its own directory (``memory_backup``
+#: aliases this); a V2 member's sit under :data:`MEMBER_BACKUPS_DIR_NAME` instead.
+STORE_BACKUP_DIR_NAME = "backups"
+_HOST_LOCAL_ROOT_ENTRIES: frozenset[str] = frozenset(
+    {MEMBER_API_KEY_FILE, MEMBER_BACKUPS_DIR_NAME, EXECUTION_LOGS_DIR_NAME}
+)
 
 #: Longest usable store name. A store name becomes a single path segment, and a
 #: 255-byte filesystem limit has to hold the name plus whatever a sidecar
@@ -345,9 +365,9 @@ def memory_index_path_for(store: str) -> Path:
     """The FTS5 index file for *store*. Does not create anything.
 
     ``"default"`` resolves to ``config_dir()/memory_index.db``, the data-home
-    root — where the index of every existing install already sits, and the only
-    place the off-store consumers look for it: the snapshot ``memory``
-    component's ``files`` tuple, ``portability``'s export/import zip and
+    root — where the index of every existing install already sits, and the place
+    the off-store consumers look for it: the snapshot ``memory`` component's
+    ``files`` tuple, ``portability``'s export/import zip and
     ``scripts/sync-to-remote.sh`` all name it root-relative. So this is
     deliberately NOT ``memory_store_dir_for(store)``'s answer for the default
     store; moving it there would silently drop the index from every backup while
@@ -355,9 +375,9 @@ def memory_index_path_for(store: str) -> Path:
 
     A NAMED store's index lives inside that store's own directory, beside the
     markdown tree it describes, which is what makes the index per-store and puts
-    it behind the ``memory_stores/`` fence. Whichever step gives the off-store
-    consumers a per-store view owns extending them; until then a named store's
-    index is simply outside their reach.
+    it behind the ``memory_stores/`` fence. The snapshot and the export carry
+    that directory as part of the ``memory_stores/`` tree, so the index rides
+    beside its markdown there; ``sync-to-remote.sh`` still names root paths only.
 
     The index is fully DERIVED — ``MemoryStore.rebuild_index`` regenerates it
     from preferences.md, projects.md and history/*.md and reads no index state —
@@ -428,6 +448,55 @@ def named_store_of_db(path: Path) -> str:
     except OSError:
         return ""
     return name
+
+
+def is_host_local_store_state(rel_parts: Sequence[str]) -> bool:
+    """Is the DATA-HOME-relative path *rel_parts* host-local state under ``memory_stores/``?
+
+    The one spelling of what a bundle leaves out of the ``memory_stores/`` tree, shared
+    by the snapshot's staging walk, its extraction filter and the dashboard export, so
+    the three cannot disagree about what "the memory" is. True for the direct children
+    listed at :data:`MEMBER_API_KEY_FILE` and its siblings, and for a named store's own
+    :data:`STORE_BACKUP_DIR_NAME`. Everything else under the tree -- the markdown, the
+    vector file, the index, ``lessons.jsonl``, the ownership manifest -- IS the memory
+    and rides.
+
+    Purely lexical, never a filesystem call: callers ask about archive members and
+    unverified directory listings, where resolving a name is the probe they exist to
+    avoid.
+    """
+    if len(rel_parts) < 2 or rel_parts[0] != MEMORY_STORES_DIR_NAME:
+        return False
+    if rel_parts[1] in _HOST_LOCAL_ROOT_ENTRIES:
+        return True
+    return len(rel_parts) >= 3 and rel_parts[2] == STORE_BACKUP_DIR_NAME
+
+
+def named_store_product_file(rel_parts: Sequence[str]) -> str:
+    """The product database *rel_parts* (data-home-relative) names inside a store, or ``""``.
+
+    Answers :data:`MEMORY_DB_FILE` for ``memory_stores/<name>/memory.db`` and the FTS
+    index filename for ``memory_stores/<name>/memory_index.db``, and ``""`` for anything
+    else -- a file deeper in the tree, a malformed store name, or the unreachable
+    ``memory_stores/default/`` spelling. The name check is :func:`named_store_or_empty`
+    plus :func:`memory_store_name_defect`, the same pair :func:`named_store_of_db`
+    applies, so a path this says is ours is one the resolvers could actually hand out.
+
+    What the answer buys: the backup tools validate a product database as strictly as
+    the root ``memory.db`` and treat a derived index as rebuildable, and neither can be
+    keyed on a fixed path because store names are the operator's. Lexical only, for
+    the same reason as :func:`is_host_local_store_state`.
+    """
+    if len(rel_parts) != 3 or rel_parts[0] != MEMORY_STORES_DIR_NAME:
+        return ""
+    name = rel_parts[1]
+    if named_store_or_empty(name) != name or memory_store_name_defect(name) is not None:
+        return ""
+    # circular import: this module is a stdlib-only leaf (see the module docstring) and
+    # ``memory`` reaches ``security``, which imports this module at import time.
+    from kiro_crew.memory import INDEX_DB_FILE
+
+    return rel_parts[2] if rel_parts[2] in (MEMORY_DB_FILE, INDEX_DB_FILE) else ""
 
 
 def declared_store_names() -> list[str]:
