@@ -85,6 +85,7 @@ from .shell_normalizer import (
     _REDIRECT_START_RE,
     _SHELL_WRAPPER_CHARS,
     _argv_programs,
+    _backtick_closer,
     _cut_at_operator,
     _data_consumer_exempt,
     _debracket,
@@ -1221,30 +1222,6 @@ def _bare_kill_raw_bodies(source: str) -> "list[str]":
     return bodies
 
 
-def _backtick_closer(source: str, start: int) -> int:
-    """Index of the backtick that CLOSES a substitution opened before *start*.
-
-    Within backticks bash strips a backslash before ``$``, ``\\``` and ``\\\\``,
-    so an escaped backtick is data and must not be taken as the closer --
-    ``str.find`` did, and it truncated ``kill `printf '\\`' ; pgrep -f <name>```
-    one clause short of the target's name (found in pre-push review, bash-
-    measured: the inner command past the escaped backtick runs).  Quotes do NOT
-    protect a backtick from closing, so this scan honours backslashes only.
-
-    -1 when no unescaped closer exists before the text ends.
-    """
-    j = start
-    n = len(source)
-    while j < n:
-        if source[j] == "\\":
-            j += 2
-            continue
-        if source[j] == "`":
-            return j
-        j += 1
-    return -1
-
-
 def _is_self_kill(text_lower: str) -> bool:
     """True if *text_lower* terminates a Kiro Crew process.
 
@@ -1342,12 +1319,33 @@ def _is_self_kill(text_lower: str) -> bool:
         # DE-QUOTED tokens, so a quoted close-paren reads as a real closer and
         # closes the window early, dropping the clause that names the target
         # (``kill $(printf ')' ; pgrep -f kirocrew)``).  Re-derive the same
-        # window from the RAW text, where the quotes still exist.
+        # window from the RAW text, where the quotes still exist.  The counter
+        # also scores a ``case`` PATTERN's ``)`` as a closer, so a lookup placed
+        # after ``case ... esac`` in the body's list falls outside the token
+        # window too -- only this raw window reaches it.  Search each body raw,
+        # with parameter defaults resolved, AND per WORD of the two tokenized
+        # views: each word de-bracketed AFTER resolving its parameter defaults
+        # and collapsing empty substitutions -- what de-quoting alone leaves
+        # behind (``'kiro''[c]rew'``, ``kiro$()crew``, ``'kiro'${x:-crew}``: a
+        # name needing TWO transforms at once sits in the seam between
+        # single-transform searches).  The transforms only rewrite construct
+        # spans, so a name a bare word shows survives them; deliberately NOT
+        # ``_normalize_operand``, because a de-quoted pgrep pattern is an ERE
+        # whose own characters (``'zz|kiro'crew``, ``'>kiro'crew``) an operand
+        # view truncates at, discarding the protected alternative -- same rule
+        # as the ``pkill`` leg's raw member.  ``_self_tokens`` joins the view
+        # for its continuation fold (a name split by ``backslash-newline``).
         for body in _bare_kill_raw_bodies(source):
             if _SELF_NAME_RE.search(_debracket(body)) or _SELF_NAME_RE.search(
                 _resolve_param_defaults(body)
             ):
                 return True
+            words = _shell_normalizer.normalize_shell_command(body)
+            words += _shell_normalizer._self_tokens(body)
+            for word in words:
+                resolved = _shell_normalizer._EMPTY_SUBST_RE.sub("", _resolve_param_defaults(word))
+                if _SELF_NAME_RE.search(_debracket(resolved)):
+                    return True
     return False
 
 

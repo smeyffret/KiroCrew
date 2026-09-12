@@ -1835,6 +1835,30 @@ def _matching_close_backtick(text: str, start: int) -> "tuple[int, bool]":
     return (len(text), False)
 
 
+def _backtick_closer(source: str, start: int) -> int:
+    """Index of the backtick that CLOSES a substitution opened before *start*.
+
+    Within backticks bash strips a backslash before ``$``, ``\\``` and ``\\\\``,
+    so an escaped backtick is data and must not be taken as the closer --
+    ``str.find`` did, and it truncated ``kill `printf '\\`' ; pgrep -f <name>```
+    one clause short of the target's name (found in pre-push review, bash-
+    measured: the inner command past the escaped backtick runs).  Quotes do NOT
+    protect a backtick from closing, so this scan honours backslashes only.
+
+    -1 when no unescaped closer exists before the text ends.
+    """
+    j = start
+    n = len(source)
+    while j < n:
+        if source[j] == "\\":
+            j += 2
+            continue
+        if source[j] == "`":
+            return j
+        j += 1
+    return -1
+
+
 def _cut_at_operator(token: str) -> str:
     """*token* up to the first GLUED shell operator, with leading ones removed.
 
