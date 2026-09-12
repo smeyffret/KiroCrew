@@ -140,22 +140,26 @@ function CandidateRow({ row, checked, onToggle, parentName }: {
   const alreadySetUp = i18nT('apps.projectScaffolder.projectScaffolderPage.already_set_up')
   return (
     <li className="flex items-start gap-2.5 py-1.5" data-testid="candidate-row">
-      <input
-        type="checkbox"
-        className="mt-[3px] shrink-0 accent-[var(--accent)] cursor-pointer disabled:cursor-not-allowed"
-        // An existing folder is reported but never re-created, so its row is
-        // informational: disabling the box is what makes that unmissable rather
-        // than leaving a tick the create step would silently ignore.
-        disabled={row.existing}
-        checked={checked}
-        onChange={(e) => onToggle(row.path, e.target.checked)}
-        // The visible name repeats across sibling directories, so the path is
-        // what disambiguates one checkbox from another in a screen-reader list.
-        aria-label={row.existing ? `${row.path} (${alreadySetUp})` : row.path}
-      />
+      {row.existing ? (
+        // An existing folder is reported, never re-created: its row is pure
+        // state, so it offers no control at all. A disabled checkbox rendered
+        // at reduced opacity still reads as tickable on a dark canvas; the
+        // icon plus the badge say "done" without offering anything to click.
+        <FolderCheck size={14} className="mt-[3px] shrink-0 text-muted" aria-hidden="true" />
+      ) : (
+        <input
+          type="checkbox"
+          className="mt-[3px] shrink-0 accent-[var(--accent)] cursor-pointer"
+          checked={checked}
+          onChange={(e) => onToggle(row.path, e.target.checked)}
+          // The visible name repeats across sibling directories, so the path is
+          // what disambiguates one checkbox from another in a screen-reader list.
+          aria-label={row.path}
+        />
+      )}
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-[13px] font-medium text-text-strong">{row.name}</span>
+          <span className={`text-[13px] font-medium ${row.existing ? 'text-muted' : 'text-text-strong'}`}>{row.name}</span>
           <TierBadge tier={row.tier} />
           {parentName && (
             // Which package this was found inside. The checkbox's own label is the
@@ -488,7 +492,10 @@ export default function ProjectScaffolderPage() {
   const selectedCount = selected.size
 
   const scanMut = useMutation({
-    mutationFn: (path: string) => scanProject(path),
+    // `keepResult` marks the automatic post-create refresh: that scan runs
+    // UNDER the Results card the user is reading, so it must keep the result
+    // a user-initiated scan clears.
+    mutationFn: ({ path }: { path: string; keepResult?: boolean }) => scanProject(path),
     // Only the root field's own prose and the stale prompt are cleared up front.
     // The previous preview, its selection, and any prior outcome survive until
     // the new scan SUCCEEDS: a transient scan failure must not cost the user a
@@ -499,14 +506,30 @@ export default function ProjectScaffolderPage() {
       setRootError('')
       setStale(null)
     },
-    onSuccess: (next, scannedPath) => {
-      setResult(null)
+    onSuccess: (next, { path, keepResult }) => {
+      if (!keepResult) {
+        setResult(null)
+        // The post-create refresh scans `scan.root`, which can spell the same
+        // directory differently from the field (`~`, a symlink). The preview
+        // still derives from the same field value, so the drift guard keeps
+        // comparing against what the user actually scanned.
+        setScannedInput(path)
+      }
       // A fresh tree re-collapses the disclosure: the deferred rows of the
-      // previous tree are not the deferred rows of this one.
-      setNestedOpen(false)
+      // previous tree are not the deferred rows of this one. The refresh is
+      // the SAME tree, so it leaves the disclosure where the user put it.
+      if (!keepResult) setNestedOpen(false)
       setScan(next)
-      setSelected(defaultSelection(next))
-      setScannedInput(scannedPath)
+      // The refresh keeps the user's hand-tuned selection rather than the
+      // server default: re-ticking a row the user deliberately unticked would
+      // arm a second create with folders they excluded. Created rows drop out
+      // on their own (they are `existing` in the fresh scan); an explicit scan
+      // is a new tree and takes the server default as before.
+      setSelected((prev) => (
+        keepResult
+          ? new Set(next.candidates.filter((c) => !c.existing && prev.has(c.path)).map((c) => c.path))
+          : defaultSelection(next)
+      ))
     },
     onError: (err) => {
       // Every scan refusal is about the root field, so it renders inline against
@@ -545,9 +568,18 @@ export default function ProjectScaffolderPage() {
       // failure beside a button that is currently working.
       setCreateError('')
     },
-    onSuccess: (r) => {
+    onSuccess: (r, { scanRoot }) => {
       setResult(r)
       setCreateError('')
+      // Refresh the preview so the rows just created flip to "Already set up"
+      // instead of staying ticked and inviting a second, pointless create. Scan
+      // the root the create actually ran against (the live field may have
+      // drifted), and call the mutation directly: `runScan` refuses while
+      // `busy`, and `createMut.isPending` can read true inside its own
+      // onSuccess. `keepResult` keeps the Results card on screen; a failed
+      // refresh leaves it alone too (scanMut.onError touches only the root
+      // field's error slot).
+      scanMut.mutate({ path: scanRoot, keepResult: true })
     },
     onError: (err) => {
       if (
@@ -582,7 +614,7 @@ export default function ProjectScaffolderPage() {
   const runScan = (path: string) => {
     const trimmed = path.trim()
     if (!trimmed || busy) return
-    scanMut.mutate(trimmed)
+    scanMut.mutate({ path: trimmed })
   }
 
   const isEmpty = scan !== null && scan.status === STATUS_EMPTY
@@ -694,15 +726,25 @@ export default function ProjectScaffolderPage() {
             <EmptyState
               icon={<FolderPlus />}
               title={i18nT('apps.projectScaffolder.projectScaffolderPage.no_sub_projects_found')}
-              subtitle={i18nT('apps.projectScaffolder.projectScaffolderPage.nothing_under_this_directory_looked_like_a_proje')}
+              subtitle={scan.root_existing
+                // The one action this branch offers would be a no-op — say so
+                // instead of promising a create the results would then report
+                // as "already existed".
+                ? i18nT('apps.projectScaffolder.projectScaffolderPage.root_already_exists_nothing_to_create')
+                : i18nT('apps.projectScaffolder.projectScaffolderPage.nothing_under_this_directory_looked_like_a_proje')}
               testId="scan-empty"
-              action={
-                <SendBtn onClick={create} disabled={busy !== '' || cannotConfirm}>
-                  {busy === 'create'
-                    ? i18nT('apps.projectScaffolder.projectScaffolderPage.creating')
-                    : i18nT('apps.projectScaffolder.projectScaffolderPage.create_the_root_folder_only')}
-                </SendBtn>
-              }
+              action={scan.root_existing
+                // With the root's folder in place the branch has nothing to
+                // offer: the subtitle states the outcome, and a control beside
+                // it — even a gated one — reads as a contradiction of it.
+                ? undefined
+                : (
+                  <SendBtn onClick={create} disabled={busy !== '' || cannotConfirm}>
+                    {busy === 'create'
+                      ? i18nT('apps.projectScaffolder.projectScaffolderPage.creating')
+                      : i18nT('apps.projectScaffolder.projectScaffolderPage.create_the_root_folder_only')}
+                  </SendBtn>
+                )}
             />
             {rootDrifted && (
               // A validation hint, not an error: nothing has failed, the field
@@ -809,7 +851,10 @@ export default function ProjectScaffolderPage() {
                 </span>
                 {/* `cannotConfirm` is the one rule (drift / stale / failed
                     re-scan) — see its definition; Re-scan is the way back. */}
-                <SendBtn onClick={create} disabled={busy !== '' || cannotConfirm}>
+                {/* With the root's folder in place and nothing ticked there is
+                    nothing this click could create, so it is refused the same
+                    way the empty branch refuses its root-only create. */}
+                <SendBtn onClick={create} disabled={busy !== '' || cannotConfirm || (selectedCount === 0 && scan.root_existing)}>
                   {busy === 'create'
                     ? i18nT('apps.projectScaffolder.projectScaffolderPage.creating')
                     : i18nT('apps.projectScaffolder.projectScaffolderPage.create_folders')}

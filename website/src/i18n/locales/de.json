@@ -4447,6 +4447,7 @@
         "project_directory": "Projektverzeichnis",
         "re_scan": "Neu scannen",
         "results": "Ergebnisse",
+        "root_already_exists_nothing_to_create": "Dieses Verzeichnis hat bereits seinen Seitenleisten-Ordner, es gibt also nichts mehr zu erstellen.",
         "root_changed_scan_before_creating": "Das Verzeichnis oben hat sich geändert — vor dem Erstellen von Ordnern erneut scannen.",
         "scan": "Scannen",
         "scan_a_project_directory_then_create_a_sidebar": "Scannen Sie ein Projektverzeichnis und erstellen Sie für jedes gewählte Teilprojekt einen Seitenleisten-Ordner.",

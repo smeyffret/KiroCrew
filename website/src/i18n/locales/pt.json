@@ -4472,6 +4472,7 @@
         "project_directory": "Diretório do projeto",
         "re_scan": "Analisar de novo",
         "results": "Resultados",
+        "root_already_exists_nothing_to_create": "Este diretório já tem a sua pasta da barra lateral, portanto não resta nada para criar.",
         "root_changed_scan_before_creating": "O diretório acima mudou — escaneie-o antes de criar pastas.",
         "scan": "Analisar",
         "scan_a_project_directory_then_create_a_sidebar": "Analise um diretório de projeto e crie uma pasta da barra lateral para cada subprojeto que escolher.",

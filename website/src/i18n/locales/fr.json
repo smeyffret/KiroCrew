@@ -4523,6 +4523,7 @@
         "project_directory": "Répertoire du projet",
         "re_scan": "Relancer l’analyse",
         "results": "Résultats",
+        "root_already_exists_nothing_to_create": "Ce répertoire a déjà son dossier de barre latérale, il n'y a donc rien à créer.",
         "root_changed_scan_before_creating": "Le répertoire ci-dessus a changé — analysez-le avant de créer des dossiers.",
         "scan": "Analyser",
         "scan_a_project_directory_then_create_a_sidebar": "Analysez un répertoire de projet, puis créez un dossier de barre latérale pour chaque sous-projet retenu.",
